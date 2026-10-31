@@ -78,7 +78,18 @@ jobs:
             exit 1
           fi
           head_sha=$(git rev-parse FETCH_HEAD)
-          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+          if [ "$head_sha" = "$GITHUB_SHA" ]; then
+            echo "apply=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$GITHUB_SHA" "$head_sha" -- infra/terraform src/lambda > /dev/null 2>&1; then
+            {
+              echo "main は先行していますが、infra/terraform と src/lambda の内容は同一のため apply します"
+              echo
+              echo "- このコミット: \`${GITHUB_SHA:0:7}\`"
+              echo "- main の先頭: \`${head_sha:0:7}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "apply=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::より新しいコミットが main にあるため apply しません (${GITHUB_SHA:0:7} -> ${head_sha:0:7})"
             {
               echo "より新しいコミットが main にあるため apply しません"
               echo
@@ -86,8 +97,6 @@ jobs:
               echo "- main の先頭: \`${head_sha:0:7}\`"
             } >> "$GITHUB_STEP_SUMMARY"
             echo "apply=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "apply=true" >> "$GITHUB_OUTPUT"
           fi
       - name: terraform apply
         if: steps.fresh.outputs.apply == 'true'

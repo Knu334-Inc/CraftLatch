@@ -445,7 +445,7 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 | `.github/workflows/terraform-apply.yml` | main への push（同じパスの変更時）と `workflow_dispatch` | Environment `production` の承認後、apply ロールで同一ジョブ内に ZIP 作成・`plan -out=tfplan`・`apply tfplan` を行う |
 
 - apply は同じジョブ内で `terraform plan -out=tfplan` → `terraform apply tfplan` とし、plan ファイルを別ジョブや artifact に引き継がない。デプロイ対象は**イベントのコミット（`github.sha`）**とし、checkout したコミット SHA をジョブサマリーに表示する。
-- `concurrency` は同時実行を防ぐだけで、コミット順の実行や待機中の実行がすべて残ることは保証しない（待機できるのは最新の 1 件で、古い待機分は取り消されうる）。古いコミットへの巻き戻りを防ぐため、apply ジョブは `terraform apply` の直前に `git fetch origin main` を行い、`github.sha` が `origin/main` の先頭と一致しない場合は apply せずに成功扱いで終了し、その旨をジョブサマリーに表示する（より新しいコミットの実行が適用する）。`workflow_dispatch` の場合も同じ確認を行う。
+- `concurrency` は同時実行を防ぐだけで、コミット順の実行や待機中の実行がすべて残ることは保証しない（待機できるのは最新の 1 件で、古い待機分は取り消されうる）。古いコミットへの巻き戻りを防ぐため、apply ジョブは `terraform apply` の直前に `git fetch origin main` を行い、`github.sha` と `origin/main` の先頭の間で `infra/terraform` または `src/lambda` に差分がある場合に限り、apply せずに成功扱いで終了し、その旨をジョブサマリーと警告に表示する（より新しいコミットの実行が適用する）。両者が異なっていても、これらのパスの内容が同一なら通常どおり apply する（パスフィルターのため、インフラに関係しない後続のコミットは apply を起動せず、先行したことだけを理由に取りやめると待機中の変更が適用されないまま残るため）。`workflow_dispatch` の場合も同じ確認を行う。
 - `concurrency: group: terraform-apply, cancel-in-progress: false` で apply を直列化する。
 - main ブランチの保護ルールで `ci` の成功をマージの必須条件にする（テストが通ったコードだけがデプロイされる）。
 - 外部の Action（`actions/checkout`、`hashicorp/setup-terraform`、`aws-actions/configure-aws-credentials`、`astral-sh/setup-uv` 等）はコミット SHA で固定する。Terraform のバージョンも固定する。
