@@ -412,6 +412,7 @@ Environment=AWS_SHARED_CREDENTIALS_FILE=%d/aws
 Environment=AWS_CONFIG_FILE=/dev/null
 StateDirectory=craftlatch
 TimeoutStartSec=50s
+TimeoutStopSec=10s
 SyslogIdentifier=craftlatch-poll
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -442,7 +443,7 @@ CPUQuota=50%
 6. AWS への接続エラー・認証エラーは、連続失敗回数を `/var/lib/craftlatch/poll-failures` に記録する。**連続失敗回数が 5 以上**のときは終了コード 1 で終了し（`OnFailure=` 発火。再通知の間隔は notify 側の 60 分抑止に任せる）、5 未満は警告ログのみで終了コード 0 とする。成功時にカウンタを 0 に戻す。
 7. 時間の上限は 2 段階で管理する。
    - API 呼び出し単位: boto3 のクライアント設定を `connect_timeout=3`、`read_timeout=5`、`retries={"total_max_attempts": 1}`（SDK 内の再試行なし。再試行は次の分の poll に任せる）とし、1 回の呼び出しは最悪約 8 秒で終わる。
-   - poll 全体: 起動時に `time.monotonic()` で期限（起動から 35 秒）を決め、期限を過ぎたら新しい API 呼び出し（Receive・Delete）を始めずに打ち切り、失敗カウンタを更新して終了する。約 43 秒は**通常時の見積もり**である（`connect_timeout`・`read_timeout` は呼び出し全体の経過時間の上限ではなく、名前解決や複数の接続先への試行で超えうる）。**厳密な打ち切りは systemd の `TimeoutStartSec=50s` が担う。** systemd に強制終了された場合は失敗カウンタの更新は保証されず、poll は failed となって `OnFailure=` で即時に通知される（5 回連続を待たない例外経路）。この経路は通知が早まるだけで安全性に影響しないため許容する。
+   - poll 全体: 起動時に `time.monotonic()` で期限（起動から 35 秒）を決め、期限を過ぎたら新しい API 呼び出し（Receive・Delete）を始めずに打ち切り、失敗カウンタを更新して終了する。約 43 秒は**通常時の見積もり**である（`connect_timeout`・`read_timeout` は呼び出し全体の経過時間の上限ではなく、名前解決や複数の接続先への試行で超えうる）。**打ち切りは systemd が担う。** 起動から 50 秒（`TimeoutStartSec=50s`）で systemd がタイムアウト処理を開始して SIGTERM を送り、それでも終了しなければ `TimeoutStopSec=10s` の経過後に SIGKILL で強制終了する（終了完了までの上限は約 60 秒。次の分の起動とは重ならないが、その回の timer 起動は前回が実行中のためスキップされうる）。 systemd に強制終了された場合は失敗カウンタの更新は保証されず、poll は failed となって `OnFailure=` で即時に通知される（5 回連続を待たない例外経路）。この経路は通知が早まるだけで安全性に影響しないため許容する。
    - 打ち切りで削除できなかったメッセージは、可視性タイムアウト後に再配信される（重複は apply が除去する）。
 
 依存パッケージ: `python3-boto3`（Ubuntu 公式 apt パッケージ。セキュリティ更新は apt で受ける）。
