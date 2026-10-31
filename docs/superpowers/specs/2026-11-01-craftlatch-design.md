@@ -488,7 +488,7 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 |---|---|
 | 初期構築（手順書。管理者が実行） | `minecraft` ユーザーへの移行（7.6）、依存パッケージの導入（`sudo apt install python3-boto3 nftables`）、アクセスキーと Webhook URL の配置（5.2 の所有者・権限で） |
 | `install.sh` の事前検証 | root で実行されていること、`minecraft` ユーザーの存在、`python3`・`python3-boto3`・`nft` の存在、systemd 248 以上、`/media/ssd/paper` の存在を確認し、満たさなければ何も変更せずに終了する |
-| `install.sh` の処理 | `craftlatch` ユーザーがなければ作成する（5.1）。スクリプト・ユニット・nft ルール・tmpfiles.d を 5.2 の所有者・権限で配置する。`config.json` は存在しない場合のみ雛形から作成する（既存の設定・秘密ファイル（`aws-credentials`・`discord-webhook`）は上書きしない）。`systemd-tmpfiles --create` と `systemctl daemon-reload` を実行する |
+| `install.sh` の処理 | `craftlatch` ユーザーがなければ作成する（5.1）。スクリプト・ユニット・nft ルール・tmpfiles.d を 5.2 の所有者・権限で配置する。`config.json` は存在しない場合のみ雛形から作成する（既存の設定・秘密ファイル（`aws-credentials`・`discord-webhook`）は上書きしない）。ルーターの MAC（`exclude_ether_saddr`）が未設定なら検出・確認のうえ補完する（6.1）。`config.json` の `trusted_sources` から nft ルールファイルを生成する。`systemd-tmpfiles --create` と `systemctl daemon-reload` を実行する |
 | `install.sh` の更新時の案内 | 稼働中のユニットは自動では再起動しない。変更されたファイルの種類に応じて、実行すべきコマンドを**順序付きで**表示する。Python スクリプトのみの変更: 次回の実行から反映されるため操作不要。ユニットファイルの変更: 表示された各ユニットの `systemctl restart`（timer・path は該当ユニット）。nft ルールの変更: `sudo systemctl restart craftlatch-firewall.service`（Minecraft の停止と許可リストの消去を伴う旨を併記） |
 
 ---
@@ -539,7 +539,7 @@ d /run/craftlatch/state 0755 root root -
 `/etc/craftlatch/config.json` の例:
 
 ```json
-{"region": "ap-northeast-1", "queue_url": "https://sqs.ap-northeast-1.amazonaws.com/<ACCOUNT_ID>/craftlatch-grants", "java_port": 25565, "bedrock_port": 19132, "grant_timeout_sec": 600, "idle_stop_sec": 900, "slp_timeout_sec": 3, "key_warn_days": 335, "trusted_sources": [{"iface": "enp3s0", "cidr": "192.168.33.0/24"}, {"iface": "wg0", "cidr": "10.0.0.0/24"}]}
+{"region": "ap-northeast-1", "queue_url": "https://sqs.ap-northeast-1.amazonaws.com/<ACCOUNT_ID>/craftlatch-grants", "java_port": 25565, "bedrock_port": 19132, "grant_timeout_sec": 600, "idle_stop_sec": 900, "slp_timeout_sec": 3, "key_warn_days": 335, "trusted_sources": [{"iface": "enp3s0", "cidr": "192.168.33.0/24", "exclude_ether_saddr": "<ルーターのMAC>"}, {"iface": "wg0", "cidr": "10.0.0.0/24"}]}
 ```
 
 ### 5.3 要求ファイルの仕様
@@ -848,7 +848,7 @@ table inet craftlatch {
   chain input {
     type filter hook input priority filter - 10; policy accept;
     iif "lo" accept
-    iifname "enp3s0" ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
+    iifname "enp3s0" ether saddr != <ルーターのMAC> ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
     iifname "wg0" ip saddr 10.0.0.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
     tcp dport 25565 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
     udp dport 19132 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
@@ -860,9 +860,13 @@ table inet craftlatch {
 
 - 先頭 3 行（`table` → `delete table` → 再定義）により、何度読み込んでも同じ結果になる。読み込みのたびに許可リストは空になる（fail-closed）。
 - **信頼する送信元（LAN・WireGuard）は認証なしで許可する**（1.2）。受信インターフェース名と送信元サブネットの両方が一致する場合のみ許可する。インターフェース名を条件に含めるのは、IP 範囲だけで許可すると、他のインターフェース（Docker のブリッジ等）や経路から同じ範囲を名乗る通信まで通してしまうため。`iif`（インデックス）ではなく `iifname`（名前）を使うのは、ルール読み込み時点（ネットワーク起動前）に `wg0` がまだ存在しないため。
-- 信頼する送信元は `/etc/craftlatch/config.json` の `trusted_sources`（`[{"iface": "enp3s0", "cidr": "192.168.33.0/24"}, {"iface": "wg0", "cidr": "10.0.0.0/24"}]`）で定義し、`install.sh` がこのファイルを雛形から生成する。fwcheck の期待構造も同じ設定から作る（6.5）。
+- 信頼する送信元は `/etc/craftlatch/config.json` の `trusted_sources`（`[{"iface": "enp3s0", "cidr": "192.168.33.0/24", "exclude_ether_saddr": "<ルーターのMAC>"}, {"iface": "wg0", "cidr": "10.0.0.0/24"}]`）で定義し、`install.sh` がこのファイルを雛形から生成する。fwcheck の期待構造も同じ設定から作る（6.5）。
 - ルーターのポートフォワードは送信元を書き換えない（SNAT しない）ことを確認済み（過去のログイン 347 件のうち 333 件がグローバル IP、14 件が LAN の IP）。SNAT されていれば外部からの通信が LAN の IP に見え、LAN の許可で素通りになるため、ルーターの設定を変更した場合は再確認する。
-- **前提条件: ルーターが WAN 側で送信元 `192.168.33.0/24`（および `10.0.0.0/24`）のパケットを破棄すること。** インターネットからの通信も LAN の通信も Ubuntu では同じ `enp3s0` で受信するため、送信元を `192.168.33.x` に偽装したパケットをルーターがそのまま転送すると、LAN の許可ルールに一致して認証を迂回される（応答は本物の LAN 端末に向かうため双方向の接続は成立しないが、未認証の UDP パケットを Geyser に到達させられる）。ホストの `rp_filter` は逆引き経路も `enp3s0` になるため防御にならない。ルーターの WAN 側の送信元検証（プライベートアドレスを送信元とするパケットの破棄）が有効であることを導入時に確認する（`docs/setup.md` の検証項目、U13）。
+- **送信元を LAN の IP に偽装したパケットへの対策（ルーターの MAC アドレスの除外）**: インターネットからの通信も LAN の通信も Ubuntu では同じ `enp3s0` で受信するため、送信元を `192.168.33.x` に偽装したパケットをルーター（エレコム WRC-X3000GS3）がそのまま転送すると、IP の条件だけでは LAN の許可ルールに一致して認証を迂回される（応答は本物の LAN 端末に向かうため双方向の接続は成立しないが、未認証の UDP パケットを Geyser に到達させられる）。ホストの `rp_filter` は逆引き経路も `enp3s0` になるため防御にならず、ルーターが WAN 側で送信元を検証するかは公式資料で確認できなかった。そこで、**ポートフォワードされたパケットは送信元 MAC アドレスが必ずルーターの MAC になる**ことを利用し、LAN の許可ルールに `ether saddr != <ルーターのMAC>` を加える。LAN 内の端末（有線・ルーターの Wi-Fi 経由とも）から直接届くパケットは端末自身の MAC のままなので許可される。これによりルーターの機種・設定に依存せず迂回を防げる。
+  - **制約**: LAN のプレイヤーが接続先にグローバル IP やドメイン名を指定すると、通信がルーターで折り返され（ヘアピン NAT）、送信元 MAC がルーターになるため遮断される。LAN からは `192.168.33.4` を指定して接続する（6.6、`docs/user-guide.md`）。
+  - **ルーターの MAC の取得**: `install.sh` が補完する。`config.json` の `exclude_ether_saddr` が未設定の場合、デフォルトゲートウェイ（`ip route show default` の `via`）の MAC を `ip neigh show <ゲートウェイ>` で取得し（ARP キャッシュになければゲートウェイに 1 回 ping してから再取得）、値を表示して管理者に確認を求めたうえで書き込む（`--yes` で確認を省略）。既存の値は上書きしない。取得できない場合や `incomplete`・`failed` 状態の場合は何も書き込まずに終了する。
+  - **ルーター交換時**: `sudo host/install.sh --refresh-router-mac` で取り直し、`sudo systemctl restart craftlatch-firewall.service` でルールを読み込み直す（`docs/operations.md` に記載）。MAC が古いままだと、新しいルーターから転送されたパケットが LAN の許可ルールに一致しうるため、交換時の必須手順とする。
+  - 取得時点でルーターになりすました ARP 応答があれば誤った MAC を記録しうるが、LAN 内に攻撃者がいる前提は本設計の範囲外とする（LAN は信頼する前提）。
 - WireGuard は、各ピアの `AllowedIPs` が自分のアドレスの `/32`（`10.0.0.2/32`、`10.0.0.3/32`）のみであることを前提とする（ピアが他の送信元を名乗れないようにするため）。`sudo wg show wg0 allowed-ips` で確認する（`docs/setup.md` の検証項目）。
 - ct state を見ずに drop するため、ESTABLISHED の接続でも未許可（失効後）であれば遮断される。**失効すると接続中のセッションもその時点で切れる。**
 - `inet` ファミリーのため、IPv6 が誤って有効化されても 25565・19132 は閉じたまま。
@@ -932,7 +936,7 @@ sudo nft delete element inet craftlatch allow4 { 203.0.113.5 }
 ### 6.5 `fwcheck`（Minecraft 起動前のルール検証）
 
 - `nft -j list table inet craftlatch` の JSON 出力を取得し、比較に関係しない値（`handle`、カウンタの `packets`/`bytes`、set の要素、`expires`）を取り除いて正規化する。
-- 正規化した結果を、fwcheck に組み込んだ**期待構造と完全一致**で比較する。テーブル内の set は `allow4` の 1 つだけ（型 `ipv4_addr`、フラグ `dynamic`・`timeout`、既定 timeout 600 秒、size 256）、チェインは `input` の 1 つだけ（`type filter hook input priority -10 policy accept`）で、ルールは 6.1 の各行（`lo` の許可、`trusted_sources` の数だけの信頼する送信元の許可、allow4 による許可 2 本、drop 2 本）が**同じ順序・同じ照合条件・同じ verdict・同じ set 参照**で並んでいなければならない。期待構造は `config.json` の `trusted_sources` から組み立てる。余分なルール（例: 先頭に紛れ込んだ無条件 `accept`）・欠落・順序違いはすべて不一致として終了コード 1 で終了する。
+- 正規化した結果を、fwcheck に組み込んだ**期待構造と完全一致**で比較する。テーブル内の set は `allow4` の 1 つだけ（型 `ipv4_addr`、フラグ `dynamic`・`timeout`、既定 timeout 600 秒、size 256）、チェインは `input` の 1 つだけ（`type filter hook input priority -10 policy accept`）で、ルールは 6.1 の各行（`lo` の許可、`trusted_sources` の数だけの信頼する送信元の許可（`exclude_ether_saddr` がある項目は送信元 MAC の除外条件を含む）、allow4 による許可 2 本、drop 2 本）が**同じ順序・同じ照合条件・同じ verdict・同じ set 参照**で並んでいなければならない。期待構造は `config.json` の `trusted_sources` から組み立てる。余分なルール（例: 先頭に紛れ込んだ無条件 `accept`）・欠落・順序違いはすべて不一致として終了コード 1 で終了する。
 - 他のテーブルは比較しない。nftables では別のベースチェインの `accept` がこのチェインの `drop` を覆さないため、このテーブルの構造だけで遮断が決まる。
 - 期待構造は 6.1 のルールファイルと同時に変更する（ルールを変えたら fwcheck の期待値も更新する。テストで両者の一致を確認する）。
 
@@ -943,7 +947,7 @@ sudo nft delete element inet craftlatch allow4 { 203.0.113.5 }
 3. **iCloud プライベートリレー・ブラウザの IP 保護・VPN・プロキシ使用時は中継 IP が登録される。** 認証時はオフにする。完了ページの登録 IP で利用者が確認できる。
 4. **途中で IP が変わると接続が切れ、再認証が必要**（モバイル回線での移動、ISP による IP 変更）。
 5. **失効はゲームからのログアウトではない。** 通信が続く限り延長され、失効したら通信が遮断される。
-7. **LAN・WireGuard からの接続は認証不要だが、サーバーは起動しない。** サーバーが停止中なら、誰か（LAN の利用者自身でもよい）がログインページで認証して起動させる。LAN から認証した場合に登録されるのは自宅のグローバル IP で、LAN 内の利用者には影響しない。人数の取得（SLP）は LAN・WireGuard の利用者も数えるため、無人停止の判定は正しく働く。
+7. **LAN・WireGuard からの接続は認証不要だが、サーバーは起動しない。** LAN からは接続先に `192.168.33.4` を指定する（グローバル IP やドメイン名を指定するとルーターで折り返され、遮断される。6.1）。 サーバーが停止中なら、誰か（LAN の利用者自身でもよい）がログインページで認証して起動させる。LAN から認証した場合に登録されるのは自宅のグローバル IP で、LAN 内の利用者には影響しない。人数の取得（SLP）は LAN・WireGuard の利用者も数えるため、無人停止の判定は正しく働く。
 6. **Cognito のアカウントを無効化しても即時遮断はされない。** 即時遮断は 6.4 の手動削除とホワイトリストからの削除で行う。
 
 ---
@@ -1257,7 +1261,7 @@ boto3 を使わず SigV4 署名を自作すれば負荷はさらに下がるが�
 | U9 | Cognito Managed Login のセッションクッキーの有効期間（`prompt=login` + `auth_time` で要件は満たすため参考情報） | Cognito ドキュメント |
 | U10 | `archive_file` が同じ内容から常に同じ ZIP を作るか（変わる場合、コード未変更でも plan に Lambda の更新が出続ける。デプロイの正しさには影響しない） | 実装時に plan を 2 回実行して確認 |
 | U11 | apply ロールに必要な IAM アクションの最小集合と、`iam:PermissionsBoundary` 条件で権限昇格を防げること | 実装時に `terraform apply` と IAM Policy Simulator で確認 |
-| U13 | ルーターが WAN 側で送信元が LAN（`192.168.33.0/24`）・WireGuard（`10.0.0.0/24`）のパケットを破棄するか | ルーターの設定画面・仕様の確認。可能なら外部の検証環境から送信元を偽装した UDP/19132 を送り、Ubuntu の `nft list chain inet craftlatch input` の LAN ルールのカウンタが増えないことを確認する（実施は管理者の判断で行う） |
+| U13 | LAN のプレイヤーが現在 `192.168.33.4` に直接接続しているか（ヘアピン NAT 経由なら、MAC の条件により遮断されるため接続先の変更が必要） | 移行後、LAN から接続して `nft list chain inet craftlatch input` の LAN ルールのカウンタが増えることを確認する |
 | U12 | DriveBackupV2 の設定（間隔・参加/退出時バックアップ）が自動起動・停止の運用で十分か。停止時にアップロード中だった場合の挙動 | DriveBackupV2 の設定ファイルとドキュメント、実機試験 |
 
 U1・U3・U6 は外れると設計の一部を見直す必要があるため、実装計画の最初のタスク（事前検証）として本番サーバー上で確認する。
