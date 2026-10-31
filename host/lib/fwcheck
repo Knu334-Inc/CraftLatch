@@ -1,0 +1,2 @@
+#!/usr/bin/python3 -Es
+import fwcheck, sys; sys.exit(fwcheck.main())
