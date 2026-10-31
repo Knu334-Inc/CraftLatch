@@ -39,3 +39,4 @@ __pycache__/
 .terraform/
 *.tfstate*
 tfplan*
+*.tfvars
