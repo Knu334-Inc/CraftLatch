@@ -302,6 +302,9 @@ data "aws_iam_policy_document" "apply_app" {
 
   # タグ付きで作成するときに必要な TagResource（CreateUserPool の依存アクション）。
   # 作成前のリソースには aws:ResourceTag がないため、付けるタグで限定する。
+  # 残存リスク: 同じアカウントのタグのない User Pool には Project=CraftLatch を付けて管理下に入れられる。
+  # アカウントを CraftLatch 専用で使う前提で受容する。他の値のタグが付いた User Pool は下の
+  # CognitoDenyRetagOtherPools で拒否する。この文を削除できるかは U11（Task 14）で確認する。
   statement {
     sid       = "CognitoTagOnCreate"
     effect    = "Allow"
@@ -311,6 +314,29 @@ data "aws_iam_policy_document" "apply_app" {
     condition {
       test     = "StringEquals"
       variable = "aws:RequestTag/Project"
+      values   = ["CraftLatch"]
+    }
+  }
+
+  # Project タグが CraftLatch 以外の値で付いている User Pool のタグ変更を拒否する（他の User Pool の乗っ取り防止）。
+  statement {
+    sid    = "CognitoDenyRetagOtherPools"
+    effect = "Deny"
+    actions = [
+      "cognito-idp:TagResource",
+      "cognito-idp:UntagResource",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/Project"
+      values   = ["false"]
+    }
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:ResourceTag/Project"
       values   = ["CraftLatch"]
     }
   }
