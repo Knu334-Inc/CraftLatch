@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -32,17 +33,22 @@ def test_mc_stop_writes_stop_and_waits(tmp_path):
     fifo = tmp_path / "console"
     os.mkfifo(fifo)
     child = subprocess.Popen([sys.executable, "-c", READER, str(fifo)])
+    # 終了した子をすぐ回収する（ゾンビだと kill -0 が成功し続けるため）
+    reaper = threading.Thread(target=child.wait, daemon=True)
+    reaper.start()
     try:
+        start = time.time()
         r = run([str(child.pid)], {"MC_CONSOLE": str(fifo), "MC_STOP_WAIT": "10"})
+        elapsed = time.time() - start
         assert r.returncode == 0, r.stderr
-        deadline = time.time() + 5
-        while child.poll() is None and time.time() < deadline:
-            time.sleep(0.1)
+        # 待機上限(10 秒)を使い切らず、子の終了を検知して戻ること
+        assert elapsed < 5, elapsed
+        reaper.join(timeout=5)
         assert child.poll() is not None
     finally:
         if child.poll() is None:
             child.kill()
-        child.wait()
+        reaper.join(timeout=5)
 
 
 def test_mc_stop_empty_pid_is_noop():
