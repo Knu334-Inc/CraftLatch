@@ -67,19 +67,19 @@
 
 **Files:**
 - Create: `docs/superpowers/plans/2026-11-01-craftlatch-spike.md`（結果の記録）
-- Create: `tests/host/fixtures/nft_list_table.json`
+- Create: `tests/host/fixtures/nft_list_table.json`、`tests/host/fixtures/craftlatch-probe.nft`、`tests/host/fixtures/craftlatch-probe-bad.nft`
 
 **どの確認も期待どおりでなければ、その時点で作業を止め、結果を管理者に報告して計画（関連するすべてのタスク）を改訂してから再開する。** 分岐のまま実装を続けない。
 
-- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `/tmp/craftlatch-probe.nft` としてサーバーに置く（`scp -P 3340 -i /workspace/.ssh/id_ed25519 <ローカルのファイル> agent@192.168.33.4:/tmp/craftlatch-probe.nft`）。続けて同じ内容の先頭に無条件の `accept` を 1 行足した `/tmp/craftlatch-probe-bad.nft` も置く（Task 15 の fwcheck 試験用）。
+- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `tests/host/fixtures/craftlatch-probe.nft` としてリポジトリに作る（Task 6 で生成器の出力と一致することを検査する）。同じ内容で `iif "lo" accept` の直後に `tcp dport 25565 accept` を 1 行挿入した `tests/host/fixtures/craftlatch-probe-bad.nft` も作る（Task 15 の fwcheck 試験用）。両方をサーバーの再起動でも消えない `~/craftlatch-probe/` に置く（`ssh -p 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4 mkdir -p craftlatch-probe && scp -P 3340 -i /workspace/.ssh/id_ed25519 tests/host/fixtures/craftlatch-probe*.nft agent@192.168.33.4:craftlatch-probe/`）。
 
 - [ ] **Step 2: U1 — `ipv6.disable=1` で `table inet` を読み込めるか（別のネットワーク名前空間で実施し、本番のルールに影響させない）**
 
-管理者に依頼: `sudo unshare --net sh -c 'nft -f /tmp/craftlatch-probe.nft && nft -j list table inet craftlatch' > /tmp/nft_list_table.json; echo rc=$?`
+管理者に依頼: `sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/craftlatch-probe.nft && nft -j list table inet craftlatch' > /home/agent/craftlatch-probe/nft_list_table.json; echo rc=$?`
 
 Expected: `rc=0` で、`/tmp/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
 
-- [ ] **Step 3: Step 2 の JSON を `tests/host/fixtures/nft_list_table.json` として取得する**（`scp -P 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4:/tmp/nft_list_table.json tests/host/fixtures/`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
+- [ ] **Step 3: Step 2 の JSON を `tests/host/fixtures/nft_list_table.json` として取得する**（`scp -P 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4:craftlatch-probe/nft_list_table.json tests/host/fixtures/`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
 
 - [ ] **Step 4: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（プラグインなしの一時サーバーで確認。jar は agent ユーザーでも読めるため sudo 不要）**
 
@@ -399,6 +399,10 @@ def test_render_contains_rules_in_order(cfg):
 def test_render_rejects_bad_iface_or_mac(cfg): ...      # iface に空白・引用符、MAC 形式違い → ValidationError
 def test_normalize_strips_volatile(fixture_json): ...   # handle・packets・bytes・elem が消える
 def test_fixture_matches_itself(fixture_json): ...      # normalize(fixture) 同士は一致、REQUIRED_RULE_SHAPES も満たす
+def test_generator_matches_probe_source():
+    # MAC=aa:bb:cc:dd:ee:ff の設定で render_ruleset した結果が tests/host/fixtures/craftlatch-probe.nft と
+    # （空白の差を除いて）一致すること。実機 JSON（nft_list_table.json）はこのファイルを読み込んだ出力なので、
+    # 生成器 → 実機の期待構造までが一本につながる
 @pytest.mark.parametrize("mutation", ["prepend_accept", "swap_rules", "drop_rule", "remove_timeout_flag", "change_set_size"])
 def test_compare_detects_mutations(fixture_json, mutation): ...       # フィクスチャを書き換えた live → 不一致で 1
 def test_main_fails_closed_on_bad_config(tmp_path): ...  # Review Focus 2 → 1
@@ -496,12 +500,6 @@ def test_tmpfiles_entries():
 def test_scripts_import_common_under_E_s(script, tmp_path):
     # host/lib を tmp_path/lib に丸ごとコピー（配置後と同じ構成）し、cwd を別ディレクトリにして
     # `sys.executable -E -s tmp_path/lib/<script> --import-check` を実行 → 終了コード 0 かつ stdout が "import-ok"
-def test_rotate_key_stages(tmp_path):
-    # PATH の先頭に偽の aws・systemctl（呼び出しを記録し、失敗させる段階を環境変数で指定）を置き、
-    # CRAFTLATCH_ETC=tmp_path/etc・CRAFTLATCH_STATE=tmp_path/state で実行:
-    # (a) 新キーの検証失敗 → 現行 aws-credentials は不変・新キーを delete・timer 再開・終了コード 1
-    # (b) 切り替え後の受信失敗 → .old を戻す・新キーを delete・終了コード 1
-    # (c) 確定後の旧キー削除失敗 → 新キーは削除しない・終了コード 1・`--finish <OLD>` で残りだけ実行して 0
 ```
 
 - [ ] **Step 2: `uv run pytest tests/host/test_units.py -v` を実行し、失敗することを確認する**
@@ -512,7 +510,24 @@ def test_rotate_key_stages(tmp_path):
 
 - [ ] **Step 5: `host/install.sh` を作成する** — `#!/usr/bin/env bash`、`set -euo pipefail`。設計書 4.7「Ubuntu 側の配置」の表どおり: 事前検証（root、`minecraft` ユーザー、`python3 -c 'import boto3'`、`nft`、`systemctl --version` ≥248、`/media/ssd/paper`）→ `craftlatch` ユーザー作成（なければ）→ `install -o root -g root -m 0755/0644` で配置 → `config.json` がなければ雛形をコピー（0644）→ `python3 -E -s /usr/local/lib/craftlatch/routermac.py [--yes] [--refresh]` → `python3 -E -s /usr/local/lib/craftlatch/nftgen.py --output /etc/craftlatch/craftlatch.nft`（設定が未完成で失敗した場合は「`/etc/craftlatch/config.json` の `queue_url` を入力して再実行」と表示して終了コード 1。キュー URL は Terraform の出力 `queue_url` を管理者が手元で確認して入力する）→ `systemd-tmpfiles --create /etc/tmpfiles.d/craftlatch.conf` → `systemctl daemon-reload` → 変更内容に応じた順序付きの案内を表示。`aws-credentials`・`discord-webhook`・既存の `config.json` は上書きしない。テスト用に配置先の接頭辞を環境変数 `CRAFTLATCH_ROOT`（既定は空）で変えられるようにする。
 
-- [ ] **Step 6: `host/scripts/craftlatch-rotate-key` を作成する** — 設計書 9.1 の手順 1〜7（確定境界・段階別の復旧・`--finish`）。設定ディレクトリと状態ディレクトリは `CRAFTLATCH_ETC`（既定 `/etc/craftlatch`）・`CRAFTLATCH_STATE`（既定 `/var/lib/craftlatch`）で変えられるようにし、Step 1 の `test_rotate_key_stages` を通す。新キーの検証は `env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new AWS_CONFIG_FILE=/dev/null AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 aws sts get-caller-identity`。
+- [ ] **Step 6a: キーローテーションの失敗するテストを書く**（`tests/host/test_rotate_key.py`）
+
+```python
+def test_rotate_key_stages(tmp_path):
+    # tmp_path/bin に偽の aws・systemctl（呼び出しを記録し、失敗させる段階を環境変数 FAKE_FAIL で指定）を置き、
+    # AWS_CLI=tmp_path/bin/aws・SYSTEMCTL=tmp_path/bin/systemctl・CRAFTLATCH_ETC=tmp_path/etc・CRAFTLATCH_STATE=tmp_path/state で実行:
+    # (a) 新キーの検証失敗 → 現行 aws-credentials は不変・新キーを delete・timer 再開・終了コード 1
+    # (b) 切り替え後の受信失敗 → .old を戻す・新キーを delete・終了コード 1
+    # (c) 確定後の旧キー削除失敗 → 新キーは削除しない・終了コード 1・`--finish <OLD>` で残りだけ実行して 0
+    # (d) 新キー検証の呼び出しが、管理者の AWS_ACCESS_KEY_ID（テストで設定）を引き継がず、
+    #     AWS_SHARED_CREDENTIALS_FILE=<CRAFTLATCH_ETC>/aws-credentials.new で行われたこと（偽 aws が環境を記録）
+```
+
+Run: `uv run pytest tests/host/test_rotate_key.py -v` → Expected: FAIL（スクリプトが無い）
+
+- [ ] **Step 6b: `host/scripts/craftlatch-rotate-key` を作成する** — 設計書 9.1 の手順 1〜7（確定境界・段階別の復旧・`--finish`）。外部コマンドは `AWS_CLI`（既定 `aws`）・`SYSTEMCTL`（既定 `systemctl`）、ディレクトリは `CRAFTLATCH_ETC`（既定 `/etc/craftlatch`）・`CRAFTLATCH_STATE`（既定 `/var/lib/craftlatch`）で変えられるようにする。新キーの検証は、起動時に `aws_bin=$(command -v "$AWS_CLI")` で絶対パスを解決してから `env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE="$CRAFTLATCH_ETC/aws-credentials.new" AWS_CONFIG_FILE=/dev/null AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 "$aws_bin" sts get-caller-identity` で行う。
+
+Run: `uv run pytest tests/host/test_rotate_key.py -v` → Expected: PASS
 
 - [ ] **Step 7: シェルスクリプトの構文を確認する**
 
@@ -522,7 +537,7 @@ Expected: 出力なし（shellcheck は Task 12 の CI で実行する）
 - [ ] **Step 8: コミット**
 
 ```bash
-git add host/systemd host/tmpfiles.d host/install.sh host/scripts tests/host/test_units.py
+git add host/systemd host/tmpfiles.d host/install.sh host/scripts tests/host/test_units.py tests/host/test_rotate_key.py
 git commit -m "feat(host): systemd ユニット・install.sh・キーローテーションを追加"
 ```
 
@@ -613,7 +628,7 @@ git commit -m "feat(infra): GitHub OIDC と GHA 用ロール・Boundary の boot
 ### Task 11: `infra/terraform`（アプリケーション本体）
 
 **Files:**
-- Create: `infra/terraform/versions.tf`、`backend.tf`（部分設定、`key = "craftlatch/terraform.tfstate"`、`use_lockfile = true`）、`variables.tf`（`region`、`project`、`cognito_domain_prefix`）、`cognito.tf`、`api.tf`、`lambda.tf`、`sqs.tf`、`iam.tf`、`outputs.tf`
+- Create: `infra/terraform/versions.tf`、`backend.tf`（部分設定、`key = "craftlatch/terraform.tfstate"`、`use_lockfile = true`）、`variables.tf`（`region`、`project`。いずれも既定値あり。CI から入力する変数は無い）、`cognito.tf`（ドメインのプレフィックスは `random_id`（`hashicorp/random`、`byte_length = 4`）で生成した `craftlatch-<hex>`。設計書 4.6 の変数 `cognito_domain_prefix` は、CI から値を渡す経路を増やさないためこの方式に置き換える）、`api.tf`、`lambda.tf`、`sqs.tf`、`iam.tf`、`outputs.tf`
 
 **Interfaces:**
 - Consumes: Task 9 の `src/lambda/craftlatch_auth/`（`archive_file` は `source_dir = "${path.module}/../../src/lambda"`・`excludes` に `__pycache__` と `*.pyc` を指定し、ZIP 内に `craftlatch_auth/` ディレクトリを保つ。ハンドラー `craftlatch_auth.handler.lambda_handler`。Task 9 の `test_zip_layout_importable` と同じ規則）、Task 10 の Boundary 名
@@ -679,7 +694,7 @@ Task 14・15 の作業手順書になるため、構築より先に初版を作�
 **Files:**
 - Create: `docs/setup.md`、`docs/operations.md`、`docs/user-guide.md`
 
-- [ ] **Step 1: `docs/setup.md` を書く** — 設計書 12 章の内容: ① state バケット作成（設計書 4.6 の 3 コマンド）→ ② `infra/bootstrap` の init/plan/apply と lock ファイルのコミット → ③ GitHub の Secret・Variable・Environment（許可ブランチ main、承認者）・ブランチ保護・Actions 設定（設計書 4.7 の検証項目）→ ④ 初回 apply（workflow_dispatch）→ ⑤ Cognito ユーザー作成（設計書 4.1 の 2 コマンド）→ ⑥ Ubuntu: 事前準備・移行（設計書 7.6）・アクセスキーと Webhook の配置・`install.sh`・ユニットの enable → ⑦ 検証項目（`wg show wg0 allowed-ips`、外部回線からの `nc -vz -w 5 <グローバルIP> 25565`、LAN からの接続でカウンタが増えること）。アカウント ID などは `<ACCOUNT_ID>` のプレースホルダーにする。
+- [ ] **Step 1: `docs/setup.md` を書く** — 設計書 12 章の内容: ① state バケット作成（設計書 4.6 の 3 コマンド）→ ② `infra/bootstrap` の init/plan/apply と lock ファイルのコミット → ③ GitHub の Secret・Variable・Environment（許可ブランチ main、承認者）・ブランチ保護・Actions 設定（設計書 4.7 の検証項目）→ ④ PR を main にマージし、起動した apply を Environment `production` で承認（初回 apply）→ ⑤ Cognito ユーザー作成（設計書 4.1 の 2 コマンド）→ ⑥ Ubuntu: 事前準備・移行（設計書 7.6）・アクセスキーと Webhook の配置・`install.sh`・ユニットの enable → ⑦ 検証項目（`wg show wg0 allowed-ips`、外部回線からの `nc -vz -w 5 <グローバルIP> 25565`、LAN からの接続でカウンタが増えること）。アカウント ID などは `<ACCOUNT_ID>` のプレースホルダーにする。
 
 - [ ] **Step 2: `docs/operations.md` を書く** — 設計書 9 章（日常運用、ローテーション、漏えい対応）、8 章の障害ケースごとの確認コマンド、ルール変更・ルーター交換（`install.sh --refresh-router-mac`）、Paper 更新、apply.path の復旧（`reset-failed`）。
 
@@ -696,12 +711,12 @@ git commit -m "docs: 構築・運用・利用者向けドキュメントの初�
 
 - [ ] **Step 1: 管理者が `docs/setup.md` の ①〜③ を実施する**（AWS 管理者の認証情報が必要なため、エージェントは実行しない。lock ファイルは Task 12 Step 5b でコミット済みであること）
 - [ ] **Step 2: 公開ログの抑止を確認する** — 一時ブランチで `infra/terraform` に構文は正しいが plan で失敗する変更（存在しない IAM ポリシー名の data ソース等）を入れた PR を作り、`terraform-plan` のログとジョブサマリーに Terraform の出力本文・URL・アカウント ID が出ず、「失敗したコマンド名と終了コード」だけが出ることを確認してから PR を閉じる。
-- [ ] **Step 3: 管理者が `docs/setup.md` の ④（初回 apply）を実施し、`terraform-apply` ワークフローの結果を確認する**
+- [ ] **Step 3: Task 12 Step 6 の PR を main にマージし、初回 apply を承認する（管理者）** — bootstrap と GitHub 側の保護設定（Step 1）、ログ抑止の確認（Step 2）、PR の `ci` 成功がそろってからマージする（それより前にマージすると、main への push で起動した apply がロールを引き受けられず失敗する）。マージで起動した `terraform-apply` を初回 apply として扱い、Environment `production` で承認する。`workflow_dispatch` は使わない。
 
 Run: `gh run list --workflow terraform-apply.yml --limit 1`
 Expected: `completed success`。サマリーに作成リソースの一覧があり、URL やアカウント ID が出ていない。
 
-- [ ] **Step 4: U11 — apply ロールの権限昇格防止を検証する（管理者が実行）** — `aws iam simulate-principal-policy --policy-source-arn <apply ロール ARN> --action-names <アクション> --resource-arns <ARN>` で次の表をすべて確認し、結果を記録する。
+- [ ] **Step 4: U11 — apply ロールの権限昇格防止を検証する（管理者が実行）** — `aws iam simulate-principal-policy --policy-source-arn <apply ロール ARN> --action-names <アクション> --resource-arns <ARN> [--context-entries <条件>] --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text` で次の表をすべて確認し、結果を記録する。期待「allowed」は `EvalDecision` が `allowed`、「denied」は `explicitDeny` または `implicitDeny`。条件付きのケースは `--context-entries "ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=<Boundary の ARN>,ContextKeyType=string"`（別 Boundary のケースは別の ARN、条件なしのケースは指定しない）、`--context-entries "ContextKeyName=iam:PassedToService,ContextKeyValues=lambda.amazonaws.com,ContextKeyType=string"`、`--context-entries "ContextKeyName=s3:prefix,ContextKeyValues=craftlatch/,ContextKeyType=string"` を付ける。
 
 | アクション | 対象 | 期待 |
 |---|---|---|
@@ -745,7 +760,7 @@ Expected: どちらも接続できず、`sudo nft list chain inet craftlatch inp
 - [ ] **Step 6: 異常系を確認する**
   - 停止処理中の認証（U3 の実機確認）。
   - 再起動による要求消失: 管理者が `sudo systemctl stop craftlatch-apply.path` で適用を止めた状態でログインし、`/run/craftlatch/requests/` に要求ファイルが置かれ SQS から削除されたことを確認 → OS を再起動 → 許可リストが空で Minecraft が自動起動しないこと → もう一度ログインすると正常に許可・起動されること。
-  - fwcheck: 本番のテーブルは変更せず、Task 0 Step 1 の `/tmp/craftlatch-probe-bad.nft` を使い `sudo unshare --net sh -c 'nft -f /tmp/craftlatch-probe-bad.nft && /usr/local/lib/craftlatch/fwcheck'; echo rc=$?` が `rc=1`、正常な `/etc/craftlatch/craftlatch.nft` では `rc=0` になること。
+  - fwcheck: 本番のテーブルは変更せず、別のネットワーク名前空間で確認する。ルーターの MAC を実際の値にした不正版を `sed 's/aa:bb:cc:dd:ee:ff/<実際のMAC>/' /home/agent/craftlatch-probe/craftlatch-probe-bad.nft > /home/agent/craftlatch-probe/bad-real.nft` で作り、`sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/bad-real.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0`（構文は正しく読み込めている）かつ `rc=1`。正常系は `sudo unshare --net sh -c 'nft -f /etc/craftlatch/craftlatch.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0` かつ `rc=0`。
   - 通知: `sudo systemctl start craftlatch-notify@test.service` で Discord に通知が届くこと。
 
 - [ ] **Step 7: LAN からの接続を確認する（U13）** — LAN の端末から `192.168.33.4` に接続でき、LAN ルールのカウンタが増える。
