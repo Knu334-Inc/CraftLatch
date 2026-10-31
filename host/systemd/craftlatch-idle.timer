@@ -1,0 +1,11 @@
+[Unit]
+Description=CraftLatch idle check timer
+PartOf=minecraft.service
+After=minecraft.service
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+
+[Install]
+WantedBy=minecraft.service

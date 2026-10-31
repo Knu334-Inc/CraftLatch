@@ -1,0 +1,10 @@
+[Unit]
+Description=Minecraft console FIFO
+PartOf=minecraft.service
+
+[Socket]
+ListenFIFO=/run/minecraft.console
+SocketUser=minecraft
+SocketGroup=minecraft
+SocketMode=0600
+RemoveOnStop=yes

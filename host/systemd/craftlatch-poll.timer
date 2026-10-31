@@ -1,0 +1,10 @@
+[Unit]
+Description=CraftLatch SQS poll timer
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

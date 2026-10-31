@@ -1,0 +1,28 @@
+[Unit]
+Description=CraftLatch idle check
+OnFailure=craftlatch-notify@%n.service
+
+[Service]
+Type=oneshot
+User=craftlatch
+Group=craftlatch
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/idle.py
+StateDirectory=craftlatch
+SyslogIdentifier=craftlatch-idle
+TimeoutStartSec=30s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/craftlatch/requests
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+IPAddressAllow=localhost
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_INET
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+MemoryMax=64M

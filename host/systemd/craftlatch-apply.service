@@ -1,0 +1,26 @@
+[Unit]
+Description=CraftLatch apply requests
+Requires=craftlatch-firewall.service
+After=craftlatch-firewall.service
+OnFailure=craftlatch-notify@%n.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/apply.py
+TimeoutStartSec=30s
+SyslogIdentifier=craftlatch-apply
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/craftlatch
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native

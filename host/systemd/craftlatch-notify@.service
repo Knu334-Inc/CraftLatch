@@ -1,0 +1,19 @@
+[Unit]
+Description=CraftLatch failure notification for %i
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/notify.py %i
+LoadCredential=webhook:/etc/craftlatch/discord-webhook
+StateDirectory=craftlatch-notify
+SyslogIdentifier=craftlatch-notify
+TimeoutStartSec=20s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
