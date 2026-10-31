@@ -33,6 +33,9 @@ iptables -A INPUT -p udp --sport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT
 # Allow inbound SSH responses
 iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
+# Allow outbound SSH to the CraftLatch Ubuntu server (192.168.33.4:3340) and its responses
+iptables -A OUTPUT -d 192.168.33.4 -p tcp --dport 3340 -j ACCEPT
+iptables -A INPUT -s 192.168.33.4 -p tcp --sport 3340 -m state --state ESTABLISHED -j ACCEPT
 # Allow localhost
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
