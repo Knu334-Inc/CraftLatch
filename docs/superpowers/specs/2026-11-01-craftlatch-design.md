@@ -220,7 +220,7 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 3. `https://<COGNITO_DOMAIN>/oauth2/token` に `grant_type=authorization_code`、`client_id`、`code`、`redirect_uri`、`code_verifier` を POST する（`urllib.request`、タイムアウト 5 秒）。
 4. ID トークンを検証する。
    - 署名検証は行わない。OIDC Core 3.1.3.7 (6) により、トークンエンドポイントから TLS で直接受け取った ID トークンは TLS のサーバー検証で代替できる。代替案（Node.js + `aws-jwt-verify` による署名検証）は依存が増えるため不採用。
-   - `iss == ISSUER`、`aud == CLIENT_ID`、`token_use == "id"`、`exp > now`、`nonce == Cookie の nonce`、`auth_time` が整数で `now - MAX_AUTH_AGE <= auth_time <= now + 60`（未来の値も拒否）、`cognito:groups` が文字列の配列で `ALLOWED_GROUP` を含む、をすべて確認する。
+   - `iss == ISSUER`、`aud == CLIENT_ID`、`token_use == "id"`、`exp > now`、`nonce == Cookie の nonce`、`auth_time` が整数で `now - MAX_AUTH_AGE <= auth_time <= now + 60`（時計のずれとして 60 秒まで許容し、それを超える未来の値は拒否）、`cognito:groups` が文字列の配列で `ALLOWED_GROUP` を含む、をすべて確認する。
    - **保証の範囲**: `prompt=login` は利用者のブラウザ側で外せるため、「毎回入力」の保証は `auth_time` の検証によるもので、厳密には「直近 `MAX_AUTH_AGE` 秒以内にパスワード入力があったこと」である。利用者本人が `prompt=login` を外した認可要求を自作すれば、直前の入力から `MAX_AUTH_AGE` 秒以内に限り入力を省略できる。Cookie を署名して取引開始時刻と `auth_time` を結び付ければ解消できるが、署名鍵の管理（Terraform の state に秘密を置かない方針との両立）が必要になるため採用せず、`MAX_AUTH_AGE` を 120 秒に短縮して残存リスクとして受容する。
 5. `requestContext.http.sourceIp` を `ipaddress.ip_address()` で解析し、`IPv4Address` かつ `is_global` であることを確認する。`X-Forwarded-For` 等のヘッダーは使わない。
 6. SQS に送信する: `{"v":1,"type":"allow","ip":"203.0.113.5","iat":<now>,"exp":<now+GRANT_TTL>,"id":"<uuid4>","user":"<cognito:username>"}`
@@ -337,6 +337,8 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin craftlatch
 | `/var/lib/craftlatch/` | craftlatch:craftlatch | 0700 | idle の状態ファイル（`StateDirectory=`） |
 | `/var/lib/private/craftlatch-notify/` | systemd 管理 | — | notify の送信履歴（`DynamicUser=` + `StateDirectory=`） |
 
+Python スクリプトの起動フラグ: 各ユニットは `python3 -E -s <スクリプト>` で起動する。`-E` で `PYTHONPATH` 等の環境変数を、`-s` でユーザーの site-packages を無視する。`-I`（isolated mode）はスクリプトのディレクトリを `sys.path` に加えず、同じディレクトリの `common.py` を import できなくなるため使わない。スクリプトのディレクトリ `/usr/local/lib/craftlatch/` は root 所有 0755 で、他のユーザーはモジュールを差し込めない。
+
 `/etc/tmpfiles.d/craftlatch.conf`:
 
 ```
@@ -369,7 +371,7 @@ d /run/craftlatch/state 0755 root root -
 | JSON 全体 | `json.loads(..., parse_constant=<例外を送出>)` で `NaN`・`Infinity` を拒否。トップレベルはオブジェクト。未知のキーは拒否 |
 | `v` | `type(v) is int` かつ `v == 1` |
 | `action` / `type` | 既定値の文字列のいずれか |
-| `iat` / `exp` | `type(x) is int`（`bool` を除外）、`0 < iat < exp`、`exp - iat <= 900`、`iat <= now + 60`、`now < exp` |
+| `iat` / `exp` | `type(x) is int`（`bool` を除外）、`0 < iat < exp`、`iat <= now + 60`、`now < exp`。有効期間の上限は action 別: allow は `exp - iat <= 600`（Lambda の `GRANT_TTL` と同値）、stop は `exp - iat <= 120` |
 | `ip` | `str`、`ipaddress.IPv4Address(ip)` が成功し `is_global`、かつ `str(IPv4Address(ip)) == ip`（正規形のみ受理） |
 | `id` | `str`、`uuid.UUID(id)` が成功し、`str(UUID(id)) == id` |
 | `user` | `str`、`^[A-Za-z0-9._@+-]{1,128}$` |
@@ -404,7 +406,7 @@ OnFailure=craftlatch-notify@%n.service
 Type=oneshot
 User=craftlatch
 Group=craftlatch
-ExecStart=/usr/bin/python3 -I /usr/local/lib/craftlatch/poll.py
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/poll.py
 LoadCredential=aws:/etc/craftlatch/aws-credentials
 Environment=AWS_SHARED_CREDENTIALS_FILE=%d/aws
 Environment=AWS_CONFIG_FILE=/dev/null
@@ -438,7 +440,10 @@ CPUQuota=50%
 4. 有効なら要求ファイルを置き、その後 `DeleteMessage` する。無効ならログ出力後に `DeleteMessage` する。
 5. 要求ファイルの配置に失敗した場合は削除しない（60 秒後に再配信される）。
 6. AWS への接続エラー・認証エラーは、連続失敗回数を `/var/lib/craftlatch/poll-failures` に記録する。**連続失敗回数が 5 以上**のときは終了コード 1 で終了し（`OnFailure=` 発火。再通知の間隔は notify 側の 60 分抑止に任せる）、5 未満は警告ログのみで終了コード 0 とする。成功時にカウンタを 0 に戻す。
-7. boto3 のクライアント設定は `connect_timeout=5`、`read_timeout=10`、`retries={"total_max_attempts": 2, "mode": "standard"}` とし、最悪でも `TimeoutStartSec=50s` 内に失敗カウンタの更新まで到達させる。
+7. 時間の上限は 2 段階で管理する。
+   - API 呼び出し単位: boto3 のクライアント設定を `connect_timeout=3`、`read_timeout=5`、`retries={"total_max_attempts": 1}`（SDK 内の再試行なし。再試行は次の分の poll に任せる）とし、1 回の呼び出しは最悪約 8 秒で終わる。
+   - poll 全体: 起動時に `time.monotonic()` で期限（起動から 35 秒）を決め、期限を過ぎたら新しい API 呼び出し（Receive・Delete）を始めずに打ち切り、失敗カウンタを更新して終了する。最後に始めた呼び出しが最悪 8 秒かかっても約 43 秒で終わり、`TimeoutStartSec=50s` までにカウンタを保存できる。想定外の遅延で systemd に強制終了された場合も、poll は failed となり `OnFailure=` で通知される。
+   - 打ち切りで削除できなかったメッセージは、可視性タイムアウト後に再配信される（重複は apply が除去する）。
 
 依存パッケージ: `python3-boto3`（Ubuntu 公式 apt パッケージ。セキュリティ更新は apt で受ける）。
 
@@ -448,6 +453,7 @@ CPUQuota=50%
 # craftlatch-apply.path
 [Unit]
 Description=CraftLatch request watcher
+OnFailure=craftlatch-notify@%n.service
 
 [Path]
 PathExistsGlob=/run/craftlatch/requests/*.req
@@ -468,7 +474,7 @@ OnFailure=craftlatch-notify@%n.service
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/bin/python3 -I /usr/local/lib/craftlatch/apply.py
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/apply.py
 TimeoutStartSec=30s
 SyslogIdentifier=craftlatch-apply
 CapabilityBoundingSet=CAP_NET_ADMIN
@@ -505,12 +511,18 @@ apply が保持する状態（`/run/craftlatch/state/`、root:root 0755。各フ
    - 最大 1025 バイトを読み、読み取った長さが 1024 バイト以下であることを再確認する（`fstat` 後のサイズ変更対策）。
    - 5.3 の検証規則で検証する。
    - 不合格のファイルは `quarantine/` へ移動する（隔離先は最大 100 件。超えたら古いものから削除）。移動に失敗したら `unlink` し、それも失敗したらエラーログを出して終了コード 1 とする。
-2. allow 要求の重複除去: `id` が `seen.json` にある要求は「処理済み」としてログに残し、適用しない（SQS の重複配信・削除失敗による再配信で、期限の再延長や停止後の再起動を起こさないため）。
+2. allow 要求の重複除去: `id` が `seen.json` にある要求は「処理済み」としてログに残し、適用しない（正常に処理を終えた後の SQS 重複配信・削除失敗による再配信で、期限の再延長や停止後の再起動を起こさないため。異常終了時の扱いは手順 3 の at-least-once を参照）。
 3. 残った allow 要求がある場合:
    - IP ごとに `add element inet craftlatch allow4 { <ip> }` → `delete element inet craftlatch allow4 { <ip> }` → `add element inet craftlatch allow4 { <ip> timeout 10m }` を生成し、すべてを 1 回のトランザクションとして `nft -f -` の標準入力に渡す。最初の `add` は未登録時に `delete` が失敗しないようにするため。トランザクションなので接続中の通信は途切れない。IP 文字列は検証済みの正規形のみを使う。
-   - nft が成功したら `seen.json` に `id` を追記し、`last-allow` を現在時刻に更新する。
+   - nft が成功したら `last-allow` を現在時刻に更新する。
    - `systemctl start --no-block minecraft.service` を実行する（起動済みなら何もしない）。終了コード 0 は「起動ジョブの受付成功」であり、Minecraft の起動成功ではない。起動の成否は `minecraft.service` 自身の `OnFailure=` で通知される。
+   - 最後に `seen.json` に `id` を追記する。
    - 同じ回の stop 要求はすべて破棄する（allow 優先）。
+   - **一度だけの適用は保証しない（at-least-once）。** nft・状態ファイル・systemd への依頼は 1 つのトランザクションにできないため、`seen.json` の記録を最後に行い、途中で apply が異常終了した場合は「もう一度適用される」側に倒す。中断位置ごとの期待動作は次のとおり。
+     - nft 適用前に中断: 何も変わらない。要求ファイルが残っていれば次回の apply で、残っていなければ SQS の再配信で適用される。
+     - nft 適用後・起動依頼前に中断: 許可は付与済み。再処理で期限が 10 分に戻り、起動が依頼される。
+     - 起動依頼後・`seen.json` 記録前に中断: 再処理で期限の再延長と起動依頼が 1 回余分に行われる（その間に停止していれば再起動する）。
+     - いずれの場合も、許可されるのは検証済みの認証済み IP のみで、再適用は要求の `exp`（認証から最大 10 分）を過ぎれば起きない。
 4. stop 要求のみの場合、次をすべて満たす stop 要求が 1 件以上あれば `systemctl stop --no-block minecraft.service` を実行する。満たさない要求は「失効」としてログに残して破棄する（隔離はしない）。
    - `now < exp`
    - `invocation` が現在の `systemctl show -p InvocationID --value minecraft.service` と一致する（以前の起動世代に対する停止要求を適用しない）
@@ -520,7 +532,7 @@ apply が保持する状態（`/run/craftlatch/state/`、root:root 0755。各フ
 6. 外部コマンドは `subprocess.run([...], shell=False, timeout=10)` で呼ぶ。
 7. ログ: `event=allow ip=... user=... id=... nft=ok start_job=ok`、`event=allow id=... result=duplicate`、`event=stop reason=idle result=ok|stale`。
 8. 部分成功の扱い: nft 成功後に `systemctl start` の受付が失敗した場合、**追加した許可は残す**（何も待ち受けていないポートへの許可は無害で、10 分で失効する。取り消し処理で既存の許可を誤って消す危険を避ける）。この場合と nft の失敗時は終了コード 1 で終了する（`OnFailure=` 発火）。利用者は再認証で再試行する。
-9. 終了コード 1 で終わり要求ファイルが残った場合、path unit は即座に apply を再起動する。繰り返し失敗すると path unit のトリガー上限に達して path unit 自体が failed になる。この状態は apply の `OnFailure=` 通知で検知し、原因を除いた後 `sudo systemctl restart craftlatch-apply.path` で復旧する。
+9. 要求ファイルの削除自体に失敗して残った場合や、apply が起動できない場合（`craftlatch-firewall.service` の失敗による依存ジョブの失敗など）、path unit は apply の起動を繰り返し、トリガー上限に達すると path unit 自体が failed になる。apply のプロセスが実行されない経路では apply の `OnFailure=` が発火しないことがあるため、**path unit にも `OnFailure=` を付けて**検知する。復旧は原因を除いた後、`sudo systemctl reset-failed craftlatch-apply.service craftlatch-apply.path` と `sudo systemctl restart craftlatch-apply.path` で行う。
 
 ### 5.6 `craftlatch-idle.timer` / `craftlatch-idle.service`
 
@@ -551,7 +563,7 @@ OnFailure=craftlatch-notify@%n.service
 Type=oneshot
 User=craftlatch
 Group=craftlatch
-ExecStart=/usr/bin/python3 -I /usr/local/lib/craftlatch/idle.py
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/idle.py
 StateDirectory=craftlatch
 SyslogIdentifier=craftlatch-idle
 TimeoutStartSec=30s
@@ -596,7 +608,7 @@ Description=CraftLatch failure notification for %i
 [Service]
 Type=oneshot
 DynamicUser=yes
-ExecStart=/usr/bin/python3 -I /usr/local/lib/craftlatch/notify.py %i
+ExecStart=/usr/bin/python3 -E -s /usr/local/lib/craftlatch/notify.py %i
 LoadCredential=webhook:/etc/craftlatch/discord-webhook
 StateDirectory=craftlatch-notify
 SyslogIdentifier=craftlatch-notify
@@ -687,7 +699,7 @@ WantedBy=sysinit.target
 | 状況 | 保証の仕組み |
 |---|---|
 | OS 起動直後 | ファイアウォールがネットワークより先に読み込まれ、許可リストは空。Minecraft は自動起動しない |
-| ルール読み込み失敗・ルールの欠落 | `minecraft.service` の `Requires=` と `ExecStartPre=+/usr/local/lib/craftlatch/fwcheck` で起動不可。fwcheck は `nft -j list table inet craftlatch` の出力を解析し、input hook のチェイン、`allow4` set（`dynamic`・`timeout` フラグ）、TCP/25565 と UDP/19132 の drop ルールがすべて存在することを確認する。これは設定事故の検出であり、root による意図的な改変を防ぐものではない |
+| ルール読み込み失敗・ルールの欠落・順序の誤り | `minecraft.service` の `Requires=` と `ExecStartPre=+/usr/local/lib/craftlatch/fwcheck` で起動不可（fwcheck の仕様は 6.5）。これは設定事故の検出であり、root による意図的な改変を防ぐものではない |
 | ファイアウォールユニットの停止操作 | `ExecStop` がないためテーブルは残る。`Requires=` により Minecraft は停止する |
 | 処理途中の失敗 | 許可の対象は常に検証済みの認証済み IP のみ。nft 失敗時は追加されず、起動ジョブ受付の失敗時は追加済みの許可が期限まで残る（5.5 の部分成功の扱い） |
 | ネットワーク障害 | 新規の許可が届かないだけで、既存の許可は期限どおり失効する |
@@ -718,7 +730,14 @@ nc -vz -w 5 <自宅のグローバルIP> 25565
 sudo nft delete element inet craftlatch allow4 { 203.0.113.5 }
 ```
 
-### 6.5 IP アドレス単位制御の制約とリスク（利用者向け案内にも記載）
+### 6.5 `fwcheck`（Minecraft 起動前のルール検証）
+
+- `nft -j list table inet craftlatch` の JSON 出力を取得し、比較に関係しない値（`handle`、カウンタの `packets`/`bytes`、set の要素、`expires`）を取り除いて正規化する。
+- 正規化した結果を、fwcheck に組み込んだ**期待構造と完全一致**で比較する。テーブル内の set は `allow4` の 1 つだけ（型 `ipv4_addr`、フラグ `dynamic`・`timeout`、既定 timeout 600 秒、size 256）、チェインは `input` の 1 つだけ（`type filter hook input priority -10 policy accept`）で、ルールは 6.1 の 5 本が**同じ順序・同じ照合条件・同じ verdict・同じ set 参照**で並んでいなければならない。余分なルール（例: 先頭に紛れ込んだ無条件 `accept`）・欠落・順序違いはすべて不一致として終了コード 1 で終了する。
+- 他のテーブルは比較しない。nftables では別のベースチェインの `accept` がこのチェインの `drop` を覆さないため、このテーブルの構造だけで遮断が決まる。
+- 期待構造は 6.1 のルールファイルと同時に変更する（ルールを変えたら fwcheck の期待値も更新する。テストで両者の一致を確認する）。
+
+### 6.6 IP アドレス単位制御の制約とリスク（利用者向け案内にも記載）
 
 1. **同じグローバル IP を共有する第三者もポートまで到達できる**（CGNAT、公衆 Wi-Fi、同居人）。最後の通信から 10 分間は有効。対策はホワイトリスト・`online-mode`・Floodgate（Xbox 認証）によるアカウント単位の拒否。**Cognito はポートを開ける仕組みであり、参加者を絞るのはホワイトリストである。**
 2. **認証した端末と遊ぶ端末で IP が違うと接続できない**（例: スマホのモバイル回線で認証し、自宅 Wi-Fi の PC で遊ぶ）。遊ぶ端末と同じネットワークで認証する。
@@ -848,7 +867,7 @@ Geyser（`plugins/Geyser-Spigot/config.yml`）: `bedrock.port: 19132`、`bedrock
 | アカウント（Java） | `online-mode` + ホワイトリスト | 参加できる Mojang アカウントを限定する |
 | アカウント（Bedrock） | Floodgate（Xbox 認証）+ ホワイトリスト | 参加できる Xbox アカウントを限定する |
 
-同一 IP の共有（6.5-1）があるため、ホワイトリストは必須とする。
+同一 IP の共有（6.6-1）があるため、ホワイトリストは必須とする。
 
 ### 7.6 既存環境からの移行手順
 
@@ -908,12 +927,14 @@ sudo systemctl enable craftlatch-idle.timer
 - 間隔: 365 日。335 日経過で poll が警告を出す。CIS AWS Foundations Benchmark の推奨（90 日）からは外れるが、キーの権限が SQS の受信・削除のみで漏えい時の影響が小さいため。
 - 手順: 管理者用スクリプト `craftlatch-rotate-key` を Ubuntu 上で root として実行する。管理者の一時的な認証情報（`AWS_PROFILE` 等）を使い、その権限はサーバーに残さない。スクリプトは次を順に行う。
   1. `aws iam create-access-key --user-name craftlatch-host` で新しいキーを発行し、`/etc/craftlatch/aws-credentials.new`（root:root 0400）に書き出す。
-  2. 新しいキー単体で `AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new aws sts get-caller-identity` を実行し、返る ARN が `craftlatch-host` であることを確認する（IAM の反映遅延に備え、最大 60 秒再試行）。`GetCallerIdentity` は IAM 権限なしで呼べるため、受信権限のないキーでも検証できる。SQS の権限はユーザー単位のポリシーなので新旧キーで同一。
-  3. `systemctl stop craftlatch-poll.timer` で定期実行を止め、`systemctl is-active craftlatch-poll.service` が `inactive` になるまで待つ（実行中の poll が旧キーを保持したまま成功扱いになるのを防ぐ）。
+  2. 新しいキー単体で `env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new AWS_CONFIG_FILE=/dev/null AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 aws sts get-caller-identity` を実行し、返る ARN が `craftlatch-host` であることを確認する（IAM の反映遅延に備え、最大 60 秒再試行）。`env -i` で管理者の `AWS_ACCESS_KEY_ID`・`AWS_PROFILE` 等を確実に除く。`GetCallerIdentity` は IAM 権限なしで呼べるため、受信権限のないキーでも検証できる。SQS の権限はユーザー単位のポリシーなので新旧キーで同一。
+  3. `systemctl stop craftlatch-poll.timer` で定期実行を止め、`systemctl is-active craftlatch-poll.service` が `inactive` または `failed` になるまで待つ（上限 120 秒。実行中の poll が旧キーを保持したまま成功扱いになるのを防ぐ）。上限を超えたら切り替えずに手順 7 へ進む。`failed` の場合は `systemctl reset-failed craftlatch-poll.service` を実行してから進む。
   4. 現在のファイルを `aws-credentials.old` に退避し、`.new` を `aws-credentials` へ `rename` する。
   5. `systemctl start craftlatch-poll.service` を実行し、`/var/lib/craftlatch/poll-failures` が 0 であること（新しいキーで受信に成功したこと）を確認する。
   6. 成功したら `aws-credentials.rotated` を更新し、`systemctl start craftlatch-poll.timer` で定期実行を再開し、古いキーを `aws iam update-access-key --user-name craftlatch-host --access-key-id <OLD> --status Inactive` で無効化してから `aws iam delete-access-key --user-name craftlatch-host --access-key-id <OLD>` で削除し、`aws-credentials.old` を削除する。
-  7. 手順 2 または 5 で失敗したら、`aws-credentials.old` を元に戻し、定期実行を再開し、新しいキーを `aws iam delete-access-key --user-name craftlatch-host --access-key-id <NEW>` で削除して、終了コード 1 で終了する。
+  7. 失敗時の復旧は段階で分ける。いずれも最後に新しいキーを `aws iam delete-access-key --user-name craftlatch-host --access-key-id <NEW>` で削除し、`aws-credentials.new` を削除して、終了コード 1 で終了する。
+     - 切り替え前（手順 2・3 で失敗）: 現行の `aws-credentials` には触れない。手順 3 で timer を止めていれば `systemctl start craftlatch-poll.timer` で再開する。
+     - 切り替え後（手順 5 で失敗）: `aws-credentials.old` を `aws-credentials` へ `rename` で戻し、`systemctl start craftlatch-poll.service` で旧キーでの受信成功を確認してから `systemctl start craftlatch-poll.timer` で再開する。
 - 期限に関係なく即時に更新する契機: サーバーの再構築、ディスクの交換・廃棄、バックアップ流出の疑い、管理者 PC の不審、IAM の「アクセスキー最終使用」に不審な使用履歴がある場合。
 
 ### 9.2 漏えい時の対応
@@ -982,6 +1003,9 @@ boto3 を使わず SigV4 署名を自作すれば負荷はさらに下がるが�
 | apply の状態遷移 | 重複 `id` の無視、同一バッチの allow 優先、`invocation` 不一致・`iat <= last-allow`・期限切れの stop の破棄、部分成功時の終了コード |
 | idle の状態遷移 | 認証直後（`last-allow` 更新）に停止しないこと、stop 要求の 5 分後の再要求、人数回復時のリセット、InvocationID 変化時の初期化 |
 | poll から apply までの結合 | 正常な SQS メッセージ相当の JSON から要求ファイル生成・apply 適用までが通ること |
+| apply の中断回復 | nft 適用前・起動依頼前・`seen.json` 記録前の各位置で中断した場合に、5.5 の期待動作（at-least-once）になること |
+| fwcheck | 6.1 のルールファイルを正規化した結果と期待構造が一致すること。先頭への無条件 `accept` の混入、ルールの欠落・順序違い、set のフラグ違いをすべて拒否すること |
+| 起動条件 | 実際の `ExecStart`（`python3 -E -s`）と同じ条件で `common.py` を import できること |
 | nft コマンド生成 | 生成されるトランザクション文字列の単体テスト（不正な IP が混入しないこと） |
 | SLP クライアント | ローカルのダミーサーバーで、正常応答・巨大応答・タイムアウト・不正 JSON を検証 |
 | Terraform | `terraform validate`・`terraform plan` の確認 |
@@ -1009,7 +1033,7 @@ boto3 を使わず SigV4 署名を自作すれば負荷はさらに下がるが�
 2. Ubuntu と systemd のバージョン（`LoadCredential=` の `%d` には systemd 248 以上が必要）
 3. AWS アカウントの作成時期（2025-07-15 以前か以降かで無料枠の形態が異なる）
 4. 既存の Paper の jar ファイル名と現在の JVM オプション
-5. 利用者への案内方法（ログイン URL と 6.5 の制約の周知）
+5. 利用者への案内方法（ログイン URL と 6.6 の制約の周知）
 
 ---
 
