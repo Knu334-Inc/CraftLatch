@@ -19,9 +19,12 @@
 | サーバー | Paper（Java Edition）+ Geyser-Spigot + Floodgate + DriveBackupV2 + Multiverse 系。`/media/ssd/paper/` 配下（`/etc/fstab` による常時マウント） |
 | 公開ポート | ルーターで IPv4 の TCP/25565 と UDP/19132 をポートフォワード。グローバル IP は固定 |
 | バックアップ | DriveBackupV2 で取得済み（本設計の範囲外。自動停止との関係は 7.4 の注意点を参照） |
-| IPv6 | Ubuntu では無効 |
-| UFW | 無効。ホストのフィルタは本設計の nftables テーブルのみ |
-| 既存起動方式 | sudoers ユーザーで `minecraft.service` を起動中 → 専用ユーザーへ移行する |
+| IPv6 | Ubuntu では無効（カーネル引数 `ipv6.disable=1`） |
+| UFW | 無効（`nftables.service` も無効）。ホストのフィルタは本設計の nftables テーブルのみ。Docker が稼働しており独自の iptables（nft バックエンド）ルールを持つが、本設計の専用テーブルとは独立 |
+| 既存起動方式 | `fuu62121`（sudo・docker グループ所属）で `screen` 経由で `paper-1.21.7-17.jar` を `-Xmx4G -Xms4G` で起動、`Restart=always`、enable 済み → 専用ユーザーへ移行する |
+| サーバー | Ubuntu 24.04.5 LTS、カーネル 6.8、systemd 255、4 コア、メモリ 15 GiB（スワップなし）、OpenJDK 21、Python 3.12（boto3 未導入）、nftables 1.0.9、時刻同期済み |
+| ネットワーク | LAN: `enp3s0`（`192.168.33.4/24`）、WireGuard: `wg0`（`10.0.0.1`、ピア `10.0.0.2`・`10.0.0.3`）。ルーターのポートフォワードは送信元を書き換えない（ログで確認済み） |
+| 既存の RCON 利用 | `whiteman.jar`（root で常駐、RCON でホワイトリストを管理）。CraftLatch と役割が重なるため廃止予定 |
 | TPM 2.0 | なし |
 | AWS リージョン | ap-northeast-1（仮定） |
 | 利用規模 | 数名、認証 1 日 5 回程度 |
@@ -35,6 +38,7 @@
 - 「通信のたびに 10 分延長」により、**接続中は失効しない**。失効は実質「最後のパケットから 10 分後」（切断後 10 分）。プレイ中の強制再認証は行わない。
 - 「失効後は再度 Cognito 認証が必要」は、**毎回 ID/パスワード入力を強制**する（`prompt=login` + `auth_time` 検証）。厳密な保証範囲は「直近 120 秒以内に入力があったこと」（4.3）。
 - MFA は使用しない。
+- LAN（`enp3s0` の `192.168.33.0/24`）と WireGuard（`wg0` の `10.0.0.0/24`）からの接続は信頼し、Cognito 認証なしで許可する（6.1）。認証による IP 制御の対象はインターネットからの接続のみ。
 
 ---
 
@@ -535,7 +539,7 @@ d /run/craftlatch/state 0755 root root -
 `/etc/craftlatch/config.json` の例:
 
 ```json
-{"region": "ap-northeast-1", "queue_url": "https://sqs.ap-northeast-1.amazonaws.com/<ACCOUNT_ID>/craftlatch-grants", "java_port": 25565, "bedrock_port": 19132, "grant_timeout_sec": 600, "idle_stop_sec": 900, "slp_timeout_sec": 3, "key_warn_days": 335}
+{"region": "ap-northeast-1", "queue_url": "https://sqs.ap-northeast-1.amazonaws.com/<ACCOUNT_ID>/craftlatch-grants", "java_port": 25565, "bedrock_port": 19132, "grant_timeout_sec": 600, "idle_stop_sec": 900, "slp_timeout_sec": 3, "key_warn_days": 335, "trusted_sources": [{"iface": "enp3s0", "cidr": "192.168.33.0/24"}, {"iface": "wg0", "cidr": "10.0.0.0/24"}]}
 ```
 
 ### 5.3 要求ファイルの仕様
@@ -844,6 +848,8 @@ table inet craftlatch {
   chain input {
     type filter hook input priority filter - 10; policy accept;
     iif "lo" accept
+    iifname "enp3s0" ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
+    iifname "wg0" ip saddr 10.0.0.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
     tcp dport 25565 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
     udp dport 19132 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
     tcp dport 25565 counter drop
@@ -853,6 +859,9 @@ table inet craftlatch {
 ```
 
 - 先頭 3 行（`table` → `delete table` → 再定義）により、何度読み込んでも同じ結果になる。読み込みのたびに許可リストは空になる（fail-closed）。
+- **信頼する送信元（LAN・WireGuard）は認証なしで許可する**（1.2）。受信インターフェース名と送信元サブネットの両方が一致する場合のみ許可する。インターフェース名を条件に含めるのは、IP 範囲だけで許可すると、他のインターフェース（Docker のブリッジ等）や経路から同じ範囲を名乗る通信まで通してしまうため。`iif`（インデックス）ではなく `iifname`（名前）を使うのは、ルール読み込み時点（ネットワーク起動前）に `wg0` がまだ存在しないため。
+- 信頼する送信元は `/etc/craftlatch/config.json` の `trusted_sources`（`[{"iface": "enp3s0", "cidr": "192.168.33.0/24"}, {"iface": "wg0", "cidr": "10.0.0.0/24"}]`）で定義し、`install.sh` がこのファイルを雛形から生成する。fwcheck の期待構造も同じ設定から作る（6.5）。
+- ルーターのポートフォワードは送信元を書き換えない（SNAT しない）ことを確認済み（過去のログイン 347 件のうち 333 件がグローバル IP、14 件が LAN の IP）。SNAT されていれば外部からの通信が LAN の IP に見え、LAN の許可で素通りになるため、ルーターの設定を変更した場合は再確認する。
 - ct state を見ずに drop するため、ESTABLISHED の接続でも未許可（失効後）であれば遮断される。**失効すると接続中のセッションもその時点で切れる。**
 - `inet` ファミリーのため、IPv6 が誤って有効化されても 25565・19132 は閉じたまま。
 - 25565・19132 以外のポートには関与しない（外部からはルーターで開けていないため到達しない）。ホスト全体のデフォルト拒否ポリシーは本設計の範囲外とし、別途検討を推奨する。
@@ -921,7 +930,7 @@ sudo nft delete element inet craftlatch allow4 { 203.0.113.5 }
 ### 6.5 `fwcheck`（Minecraft 起動前のルール検証）
 
 - `nft -j list table inet craftlatch` の JSON 出力を取得し、比較に関係しない値（`handle`、カウンタの `packets`/`bytes`、set の要素、`expires`）を取り除いて正規化する。
-- 正規化した結果を、fwcheck に組み込んだ**期待構造と完全一致**で比較する。テーブル内の set は `allow4` の 1 つだけ（型 `ipv4_addr`、フラグ `dynamic`・`timeout`、既定 timeout 600 秒、size 256）、チェインは `input` の 1 つだけ（`type filter hook input priority -10 policy accept`）で、ルールは 6.1 の 5 本が**同じ順序・同じ照合条件・同じ verdict・同じ set 参照**で並んでいなければならない。余分なルール（例: 先頭に紛れ込んだ無条件 `accept`）・欠落・順序違いはすべて不一致として終了コード 1 で終了する。
+- 正規化した結果を、fwcheck に組み込んだ**期待構造と完全一致**で比較する。テーブル内の set は `allow4` の 1 つだけ（型 `ipv4_addr`、フラグ `dynamic`・`timeout`、既定 timeout 600 秒、size 256）、チェインは `input` の 1 つだけ（`type filter hook input priority -10 policy accept`）で、ルールは 6.1 の各行（`lo` の許可、`trusted_sources` の数だけの信頼する送信元の許可、allow4 による許可 2 本、drop 2 本）が**同じ順序・同じ照合条件・同じ verdict・同じ set 参照**で並んでいなければならない。期待構造は `config.json` の `trusted_sources` から組み立てる。余分なルール（例: 先頭に紛れ込んだ無条件 `accept`）・欠落・順序違いはすべて不一致として終了コード 1 で終了する。
 - 他のテーブルは比較しない。nftables では別のベースチェインの `accept` がこのチェインの `drop` を覆さないため、このテーブルの構造だけで遮断が決まる。
 - 期待構造は 6.1 のルールファイルと同時に変更する（ルールを変えたら fwcheck の期待値も更新する。テストで両者の一致を確認する）。
 
@@ -932,6 +941,7 @@ sudo nft delete element inet craftlatch allow4 { 203.0.113.5 }
 3. **iCloud プライベートリレー・ブラウザの IP 保護・VPN・プロキシ使用時は中継 IP が登録される。** 認証時はオフにする。完了ページの登録 IP で利用者が確認できる。
 4. **途中で IP が変わると接続が切れ、再認証が必要**（モバイル回線での移動、ISP による IP 変更）。
 5. **失効はゲームからのログアウトではない。** 通信が続く限り延長され、失効したら通信が遮断される。
+7. **LAN・WireGuard からの接続は認証不要だが、サーバーは起動しない。** サーバーが停止中なら、誰か（LAN の利用者自身でもよい）がログインページで認証して起動させる。LAN から認証した場合に登録されるのは自宅のグローバル IP で、LAN 内の利用者には影響しない。人数の取得（SLP）は LAN・WireGuard の利用者も数えるため、無人停止の判定は正しく働く。
 6. **Cognito のアカウントを無効化しても即時遮断はされない。** 即時遮断は 6.4 の手動削除とホワイトリストからの削除で行う。
 
 ---
@@ -1014,7 +1024,8 @@ SystemCallArchitectures=native
 - `[Install]` なし・enable しない。起動は apply service からのみ。
 - `Restart=no`: クラッシュ時は次の認証で起動する（無人での再起動ループを防ぐ）。
 - メモリ: `MemoryHigh = -Xmx + 1GB`（超過で回収を強制・減速）、`MemoryMax = -Xmx + 1.5GB`（超過で強制終了）。JVM はヒープ以外（Metaspace、スレッドスタック、Netty のダイレクトバッファ等）も使うため余裕を持たせる。**4G は仮の値で、搭載メモリに合わせて調整する。**
-- CPU: `CPUWeight=80`（OS より低い優先度）。`CPUQuota=` はコア数確定後に「全コア数 − 1」程度を設定するか判断する。
+- CPU: `CPUWeight=80`（OS より低い優先度）、`CPUQuota=300%`（4 コア中 3 コア分を上限とし、OS・Docker 等に 1 コア分を残す）。
+- メモリの前提: 搭載 15 GiB・スワップなし。既存と同じ `-Xmx4G` で `MemoryMax=5632M` は余裕がある。
 - `MemoryDenyWriteExecute=yes` は使わない（JIT が書き込み可能かつ実行可能なメモリを必要とする）。
 - `SystemCallFilter=@system-service` は JVM・Paper・Geyser での動作を実機確認できてから追加する。
 - 外向き通信（Mojang のセッションサーバー、Xbox 認証）が必要なため、IP の外向き制限はしない。
@@ -1036,8 +1047,8 @@ Paper は `stop` でプレイヤーを切断し、ワールドを保存してか
 |---|---|---|
 | `online-mode` | `true` | Mojang アカウント認証を必須にする |
 | `white-list` | `true` | ホワイトリストを有効化 |
-| `enforce-whitelist` | `true` | リスト外のプレイヤーを接続中でも切断 |
-| `enable-rcon` | `false` | 使わない |
+| `enforce-whitelist` | `true`（現状 `false` から変更） | リスト外のプレイヤーを接続中でも切断 |
+| `enable-rcon` | `false`（現状 `true` から変更。25575 番が全インターフェースで待ち受けている） | 使わない。現在 RCON を使う `whiteman.jar` は廃止する（7.6） |
 | `enable-query` | `false` | 使わない |
 | `enable-status` | `true` | idle の SLP に必要 |
 | `server-port` | `25565` | |
@@ -1066,6 +1077,14 @@ Geyser（`plugins/Geyser-Spigot/config.yml`）: `bedrock.port: 19132`、`bedrock
 
 ### 7.6 既存環境からの移行手順
 
+事前準備:
+
+1. ワールドのバックアップを取得する（DriveBackupV2 の手動実行、または `/media/ssd/paper` 全体の複製）。
+2. `whiteman.jar` を廃止する。root で常駐しており起動方法が未確認のため、`sudo systemctl status <PID>` で所属ユニット（または cron・screen 等）を特定して停止・無効化する。RCON を無効にするとこのツールは動作しなくなる。
+3. `sudo apt install python3-boto3` で依存パッケージを導入する（nftables は導入済み）。
+
+移行:
+
 ```
 sudo systemctl disable --now minecraft.service
 sudo cp /etc/systemd/system/minecraft.service /etc/systemd/system/minecraft.service.bak
@@ -1083,7 +1102,7 @@ sudo systemctl enable --now craftlatch-apply.path craftlatch-poll.timer
 sudo systemctl enable craftlatch-idle.timer
 ```
 
-既存ユニットが `/etc/systemd/system/` 以外にある場合は `systemctl cat minecraft.service` で表示されるパスに読み替える。作業前にワールドのバックアップを取得する。
+既存ユニットは `/etc/systemd/system/minecraft.service`（`screen` 経由・`Restart=always`・`User=fuu62121`）であることを確認済み。`server.properties` の `enable-rcon=false`・`enforce-whitelist=true` への変更と、`paper.jar` シンボリックリンク（`paper-1.21.7-17.jar` を指す）の作成もこの段階で行う。古い jar（`paper-1.20.2-217.jar` 等）は移行後に整理してよい。
 
 ---
 
@@ -1247,7 +1266,7 @@ U1・U3・U6 は外れると設計の一部を見直す必要があるため、�
 4. 既存の Paper の jar ファイル名と現在の JVM オプション
 5. 利用者への案内方法（ログイン URL と 6.6 の制約の周知）
 
-1・2・4 は実装計画の事前検証タスクで、サーバー上のコマンド（`free -h`・`nproc`・`lsb_release -a`・`systemctl --version`・`systemctl cat minecraft.service`）により確認する。
+1・2・4 はサーバーへの SSH（読み取り専用）で確認済み（14.1）。3・5 は未回答。
 
 ### 14.1 確認済みの事項
 
@@ -1258,6 +1277,16 @@ U1・U3・U6 は外れると設計の一部を見直す必要があるため、�
 | 導入済みプラグイン | Geyser・Floodgate・DriveBackupV2・Multiverse 系 |
 | F05（`prompt=login` の残存リスク） | `MAX_AUTH_AGE = 120` 秒で受容 |
 | GitHub 管理者アカウントの 2 要素認証 | パスキー登録済み |
+| CPU・メモリ | 4 コア、15 GiB（スワップなし） |
+| Ubuntu・systemd | 24.04.5 LTS・systemd 255 |
+| 既存の jar・JVM オプション | `paper-1.21.7-17.jar`、`-Xmx4G -Xms4G`（`start.sh` 経由） |
+| LAN・WireGuard | 認証なしで許可（6.1） |
+| `whiteman.jar` | RCON を使用。廃止予定（7.6） |
+
+### 14.2 範囲外の推奨事項（SSH での確認時に気づいた点）
+
+- Node.js のデバッグポート 9229 が全インターフェースで待ち受けている。LAN 内から任意のコードを実行されうるため、不要なら停止し、必要なら `127.0.0.1` に限定することを推奨する。
+- ホスト全体の受信を既定で拒否するファイアウォール（Samba・3000・8888・8889 等を LAN に限定）は本設計の範囲外だが、別途検討を推奨する。
 
 ---
 
