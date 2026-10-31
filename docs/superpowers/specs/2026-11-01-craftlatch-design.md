@@ -238,6 +238,7 @@ docs/                     setup.md operations.md user-guide.md（第 12 章）
 |---|---|---|
 | プラン | Essentials | Managed Login と `prompt=login` に必要。10,000 MAU まで無料 |
 | サインイン識別子 | ユーザー名 | メール属性は不要 |
+| ユーザー名の大文字小文字 | 区別しない（`case_sensitive=false`。作成後は変更不可） | 大文字小文字だけが異なる同名ユーザーの作成を防ぐ |
 | サインアップ | 管理者のみ（`AllowAdminCreateUserOnly=true`） | 第三者が自分でアカウントを作れないようにする |
 | MFA | OFF | 合意事項 |
 | パスワードポリシー | 最小 14 文字（文字種の条件は任意） | MFA がないため長さで補う |
@@ -251,6 +252,7 @@ docs/                     setup.md operations.md user-guide.md（第 12 章）
 
 - パブリッククライアント（クライアントシークレットなし）+ PKCE。シークレットの保管が不要で、トークン取得には認可コードと code_verifier の両方が必要。
 - 許可フロー: `code` のみ。スコープ: `openid` のみ。
+- 認証フロー（`ExplicitAuthFlows`）: `ALLOW_REFRESH_TOKEN_AUTH` のみ（Managed Login の code フロー以外を無効化）。
 - コールバック URL: `https://<api-id>.execute-api.ap-northeast-1.amazonaws.com/callback` の 1 件のみ。ログアウト URL なし。
 - ID・アクセストークン有効期間: 5 分（最短）。リフレッシュトークン: 60 分（最短）。リフレッシュトークンは Lambda で使わずに破棄する。
 

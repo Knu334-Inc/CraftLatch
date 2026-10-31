@@ -5,6 +5,11 @@ resource "aws_cognito_user_pool" "this" {
   user_pool_tier = "ESSENTIALS"
 
   # サインイン識別子はユーザー名（username_attributes・alias_attributes は指定しない）。
+  # ユーザー名の大文字小文字は区別しない（作成後は変更できず、変えると User Pool が作り直しになる）。
+  username_configuration {
+    case_sensitive = false
+  }
+
   admin_create_user_config {
     allow_admin_create_user_only = true
   }
@@ -57,6 +62,9 @@ resource "aws_cognito_user_pool_client" "web" {
   allowed_oauth_scopes                 = ["openid"]
   supported_identity_providers         = ["COGNITO"]
   callback_urls                        = ["${aws_apigatewayv2_api.this.api_endpoint}/callback"]
+
+  # Managed Login の code フロー以外（USER_SRP・CUSTOM など）を無効にする。
+  explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]
 
   prevent_user_existence_errors = "ENABLED"
 
