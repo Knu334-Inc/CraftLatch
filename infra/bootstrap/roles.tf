@@ -343,6 +343,7 @@ data "aws_iam_policy_document" "apply_app" {
 
   # 既存の User Pool とその配下（アプリクライアント・ドメイン・グループ・ブランディング）。
   # これらのアクションの対象は User Pool の ARN で、User Pool のタグで判定される。
+  # ListUserPoolClients は aws_cognito_managed_login_branding の読み取り（refresh のたび）で呼ばれる。
   statement {
     sid    = "CognitoManageTaggedUserPools"
     effect = "Allow"
@@ -363,6 +364,7 @@ data "aws_iam_policy_document" "apply_app" {
       "cognito-idp:GetGroup",
       "cognito-idp:GetUserPoolMfaConfig",
       "cognito-idp:ListTagsForResource",
+      "cognito-idp:ListUserPoolClients",
       "cognito-idp:SetUserPoolMfaConfig",
       "cognito-idp:TagResource",
       "cognito-idp:UntagResource",

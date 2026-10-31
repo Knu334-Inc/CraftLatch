@@ -360,9 +360,9 @@ Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`�
 
 ### 4.6 Terraform
 
-- Terraform 1.10 以上（S3 ネイティブロック `use_lockfile` のため）で、バージョンを固定する。プロバイダー（`hashicorp/aws`、`hashicorp/archive`）は `~> <メジャー>.<マイナー>` で制約し、`infra/terraform/` と `infra/bootstrap/` の `.terraform.lock.hcl` をコミットする。CI は `terraform init -lockfile=readonly` を使い、プロバイダーの更新は明示的な PR で行う。
+- Terraform 1.10 以上（S3 ネイティブロック `use_lockfile` のため）で、バージョンを固定する。プロバイダー（`hashicorp/aws`、`hashicorp/archive`、`hashicorp/random`）は `~> <メジャー>.<マイナー>` で制約し、`infra/terraform/` と `infra/bootstrap/` の `.terraform.lock.hcl` をコミットする。CI は `terraform init -lockfile=readonly` を使い、プロバイダーの更新は明示的な PR で行う。
 - ルートモジュール 1 つ。モジュール分割はしない。
-- 変数: `region`、`project`（既定 `craftlatch`）、`cognito_domain_prefix`。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。
+- 変数: `region`、`project`（既定 `craftlatch`）のみ。Cognito ドメインのプレフィックスは変数にせず `random_id`（`byte_length = 4`）で生成する（`craftlatch-<16 進 8 桁>`）。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。
 - CI では常に `-input=false` を付ける。
 - 実行は GitHub Actions（4.7）。管理者が手元で実行するのは、`infra/bootstrap/` の適用（初回および変更・復旧時）と、詳細な差分確認のための `terraform plan` のみ。
 - Lambda のコードのデプロイも Terraform で行う。`archive_file` データソースで `src/lambda/craftlatch_auth/` を ZIP にし（`__pycache__`・テストは除外。外部ライブラリがないため `pip install` 等のビルド工程はない）、`aws_lambda_function` の `filename` と `source_code_hash` に渡す。コードが変わればハッシュが変わり、apply で Lambda が更新される。
