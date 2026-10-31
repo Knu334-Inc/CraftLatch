@@ -105,7 +105,10 @@ flowchart TB
             minecraft["minecraft.service<br/>Paper + Geyser + Floodgate"]
             fifo[("minecraft.socket<br/>FIFO: /run/minecraft.console")]
         end
-        notify["craftlatch-notify@.service"]
+        subgraph notifyGroup["失敗通知"]
+            onfail
+            notify["craftlatch-notify@.service"]
+        end
     end
 
     browser -- "① /login・/callback" --> apigw
@@ -130,7 +133,7 @@ flowchart TB
     fifo -- "stdin" --> minecraft
     player -- "TCP/25565・UDP/19132" --> nft
     nft -- "許可 IP のみ" --> minecraft
-    poll & apply & applyPath & idle & minecraft -. "OnFailure=" .-> notify
+    onfail["各ユニットの OnFailure=<br/>poll・apply・apply.path・idle・firewall・minecraft"] -.-> notify
     notify -- "HTTPS" --> discord
 ```
 
