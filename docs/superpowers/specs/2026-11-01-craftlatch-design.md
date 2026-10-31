@@ -407,7 +407,7 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 **state バケットの権限（plan・apply 共通の境界）**
 
 - オブジェクト操作は `craftlatch/terraform.tfstate` と `craftlatch/terraform.tfstate.tflock` の 2 つのキーに限定する（plan: state の `GetObject`、ロックファイルの `GetObject`・`PutObject`・`DeleteObject`。apply: 両キーの `GetObject`・`PutObject`・`DeleteObject`）。
-- `s3:ListBucket` は条件 `s3:prefix` で `craftlatch/` に限定する。
+- `s3:ListBucket` は条件 `StringLike` で `s3:prefix` を `craftlatch/*`（`craftlatch/` 配下の前方一致）に限定する。S3 backend が `terraform init` 時にワークスペース一覧の取得で別の prefix（既定 `env:/`）を要求し失敗する場合は、その prefix を `StringLike` の値に追加する（一覧取得のみで内容は読めない）。通常の `init`・`plan`・`apply` が通ることを U11 で確認する。
 - `bootstrap/` 配下のキー、およびバケットのポリシー・公開設定・バージョニング・暗号化設定の変更は、plan・apply ロールのどちらにも許可しない。
 
 **plan ロールの権限**
@@ -444,7 +444,8 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 | `.github/workflows/terraform-plan.yml` | `infra/terraform/**` または `src/lambda/**` を変更した PR | plan ロールで `init` → `plan`。リソースの一覧と作成・変更・削除の件数を PR のジョブサマリーに表示 |
 | `.github/workflows/terraform-apply.yml` | main への push（同じパスの変更時）と `workflow_dispatch` | Environment `production` の承認後、apply ロールで同一ジョブ内に ZIP 作成・`plan -out=tfplan`・`apply tfplan` を行う |
 
-- apply は同じジョブ内で `terraform plan -out=tfplan` → `terraform apply tfplan` とし、plan ファイルを別ジョブや artifact に引き継がない。デプロイ対象は**イベントのコミット（`github.sha`）**とし、checkout したコミット SHA をジョブサマリーに表示する。後続の push はそれぞれ自分の SHA で別に実行される（`concurrency` で直列化）。
+- apply は同じジョブ内で `terraform plan -out=tfplan` → `terraform apply tfplan` とし、plan ファイルを別ジョブや artifact に引き継がない。デプロイ対象は**イベントのコミット（`github.sha`）**とし、checkout したコミット SHA をジョブサマリーに表示する。
+- `concurrency` は同時実行を防ぐだけで、コミット順の実行や待機中の実行がすべて残ることは保証しない（待機できるのは最新の 1 件で、古い待機分は取り消されうる）。古いコミットへの巻き戻りを防ぐため、apply ジョブは `terraform apply` の直前に `git fetch origin main` を行い、`github.sha` が `origin/main` の先頭と一致しない場合は apply せずに成功扱いで終了し、その旨をジョブサマリーに表示する（より新しいコミットの実行が適用する）。`workflow_dispatch` の場合も同じ確認を行う。
 - `concurrency: group: terraform-apply, cancel-in-progress: false` で apply を直列化する。
 - main ブランチの保護ルールで `ci` の成功をマージの必須条件にする（テストが通ったコードだけがデプロイされる）。
 - 外部の Action（`actions/checkout`、`hashicorp/setup-terraform`、`aws-actions/configure-aws-credentials`、`astral-sh/setup-uv` 等）はコミット SHA で固定する。Terraform のバージョンも固定する。
