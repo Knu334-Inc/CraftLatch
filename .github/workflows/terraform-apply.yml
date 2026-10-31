@@ -80,7 +80,7 @@ jobs:
           head_sha=$(git rev-parse FETCH_HEAD)
           if [ "$head_sha" = "$GITHUB_SHA" ]; then
             echo "apply=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$GITHUB_SHA" "$head_sha" -- infra/terraform src/lambda > /dev/null 2>&1; then
+          elif git diff --quiet "$GITHUB_SHA" "$head_sha" -- ':/infra/terraform' ':/src/lambda' > /dev/null 2>&1; then
             {
               echo "main は先行していますが、infra/terraform と src/lambda の内容は同一のため apply します"
               echo
