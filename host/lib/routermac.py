@@ -74,9 +74,9 @@ def set_router_mac(config_path: Path, mac: str, overwrite: bool) -> bool:
         if _is_unset(s["exclude_ether_saddr"]) or overwrite:
             s["exclude_ether_saddr"] = mac
             wrote = True
+    if wrote:
         atomic_write_text(Path(config_path), json.dumps(obj, ensure_ascii=False, indent=2) + "\n", 0o644)
     return wrote
-    return True
 
 
 def _already_set(config_path: Path) -> bool:
