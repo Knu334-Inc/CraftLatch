@@ -67,7 +67,7 @@
 
 **Files:**
 - Create: `docs/superpowers/plans/2026-11-01-craftlatch-spike.md`（結果の記録）
-- Create: `tests/host/fixtures/nft_list_table.json`、`tests/host/fixtures/craftlatch-probe.nft`、`tests/host/fixtures/craftlatch-probe-bad.nft`
+- Create: `host/lib/fwcheck-expected.json`、`tests/host/fixtures/craftlatch-probe.nft`、`tests/host/fixtures/craftlatch-probe-bad.nft`
 
 **どの確認も期待どおりでなければ、その時点で作業を止め、結果を管理者に報告して計画（関連するすべてのタスク）を改訂してから再開する。** 分岐のまま実装を続けない。
 
@@ -77,9 +77,9 @@
 
 管理者に依頼: `sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/craftlatch-probe.nft && nft -j list table inet craftlatch' > /home/agent/craftlatch-probe/nft_list_table.json; echo rc=$?`
 
-Expected: `rc=0` で、`/tmp/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
+Expected: `rc=0` で、`/home/agent/craftlatch-probe/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
 
-- [ ] **Step 3: Step 2 の JSON を `tests/host/fixtures/nft_list_table.json` として取得する**（`scp -P 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4:craftlatch-probe/nft_list_table.json tests/host/fixtures/`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
+- [ ] **Step 3: Step 2 の JSON を `host/lib/fwcheck-expected.json` として取得する**（`scp -P 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4:craftlatch-probe/nft_list_table.json host/lib/fwcheck-expected.json`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
 
 - [ ] **Step 4: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（プラグインなしの一時サーバーで確認。jar は agent ユーザーでも読めるため sudo 不要）**
 
@@ -98,7 +98,7 @@ Expected: `active`（停止完了後に再起動された）。`inactive` の場
 - [ ] **Step 6: 結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に記録し、コミットする**
 
 ```bash
-git add docs/superpowers/plans/2026-11-01-craftlatch-spike.md tests/host/fixtures/nft_list_table.json
+git add docs/superpowers/plans/2026-11-01-craftlatch-spike.md host/lib/fwcheck-expected.json tests/host/fixtures/craftlatch-probe.nft tests/host/fixtures/craftlatch-probe-bad.nft
 git commit -m "docs: 事前検証（U1・U3・U6）の結果を記録"
 ```
 
@@ -377,12 +377,12 @@ git commit -m "feat(host): SLP による無人検知と stop 要求を追加"
 - Test: `tests/host/test_nftgen.py`、`tests/host/test_fwcheck.py`、`tests/host/test_routermac.py`
 
 **Interfaces:**
-- Consumes: Task 2 の `Config`、`TrustedSource`、`load_config`、`atomic_write_text`；Task 0 のフィクスチャ
+- Consumes: Task 2 の `Config`、`TrustedSource`、`load_config`、`atomic_write_text`；Task 0 の `host/lib/fwcheck-expected.json`（テストの `fixture_json` はこのファイルを読む）と `tests/host/fixtures/craftlatch-probe.nft`
 - Produces:
   - `render_ruleset(cfg: Config) -> str`（設計書 6.1 の全文、`table inet craftlatch`）
   - `nftgen.main(argv: list[str] | None = None) -> int`（`nftgen.py --output <path>`。`load_config()` で完成した設定を検証し、ルールを `<path>.tmp` に書いてから `rename` で置き換える。検証失敗時は既存ファイルに触れず 1 を返す）
   - `normalize(nft_json: dict) -> list`（`handle`・カウンタ値・set の要素・`expires` を除去し、メタ情報 `metainfo` を除く）
-  - `expected_json(cfg: Config, runner) -> dict`（`render_ruleset` の結果を一時ファイルに書き、Task 0 Step 2 と同じ方式 `["unshare", "--net", "--", "sh", "-c", 'nft -f "$1" && nft -j list table inet craftlatch', "sh", <一時ファイル>]` で別の名前空間に読み込んだ出力）
+  - `expected_json(cfg: Config, template_path: Path = Path("/usr/local/lib/craftlatch/fwcheck-expected.json")) -> dict`（**実行時に名前空間を作らない**。`minecraft.service` の `RestrictNamespaces=yes` と衝突させないため。Task 0 で実機から取得したフィクスチャ JSON を雛形として `install.sh` が配置し、その中のルーター MAC `aa:bb:cc:dd:ee:ff` を `cfg` の `exclude_ether_saddr` に置き換えたものを期待構造とする。`cfg.trusted_sources` の iface・cidr の並びが雛形と一致しない場合は `ValidationError`（`trusted_sources` を変えたら雛形を取り直す。手順は `docs/operations.md`）。fwcheck が実行する外部コマンドは `nft -j list table inet craftlatch` だけ）
   - `REQUIRED_RULE_SHAPES`（生成器と独立した最低限の検査。正規化後の live に、`lo` の accept、TCP/25565 と UDP/19132 の drop が末尾 2 本にあること、`allow4` が `dynamic`・`timeout` フラグを持つことを確認する。生成器と期待値が同じ誤りを共有しても検出できるようにする）
   - `fwcheck.main(argv: list[str] | None = None) -> int`（live と expected の `normalize` が一致すれば 0、不一致・設定不正・コマンド失敗は 1）
   - `default_gateway(ip_route_output: str) -> str`、`neigh_mac(ip_neigh_output: str) -> str | None`（`REACHABLE`/`STALE`/`DELAY`/`PERMANENT` のみ。`INCOMPLETE`/`FAILED` は None）、`set_router_mac(config_path: Path, mac: str, overwrite: bool) -> bool`（`load_config` を使わず JSON を直接読み書きする。補完前は他の項目が未入力でもよいため。`atomic_write_text` で 0644 書き込み）、`routermac.main(argv) -> int`（`--yes`、`--refresh`）
@@ -407,6 +407,10 @@ def test_generator_matches_probe_source():
 def test_compare_detects_mutations(fixture_json, mutation): ...       # フィクスチャを書き換えた live → 不一致で 1
 def test_main_fails_closed_on_bad_config(tmp_path): ...  # Review Focus 2 → 1
 def test_main_fails_on_runner_error(): ...               # nft 失敗 → 1
+def test_expected_json_substitutes_mac_and_checks_sources(fixture_json, tmp_path):
+    # 雛形の aa:bb:cc:dd:ee:ff が設定の MAC に置き換わり、雛形内に aa:bb:cc:dd:ee:ff が残らない
+    # trusted_sources の cidr を 192.168.34.0/24 に変えた設定 → ValidationError
+def test_fwcheck_runs_only_nft_list(fixture_json): ...   # runner に渡されるコマンドは ["nft", "-j", "list", "table", "inet", "craftlatch"] の 1 回だけ（unshare を呼ばない）
 def test_neigh_parsing():
     assert neigh_mac("192.168.33.1 dev enp3s0 lladdr aa:bb:cc:dd:ee:ff REACHABLE") == "aa:bb:cc:dd:ee:ff"
     assert neigh_mac("192.168.33.1 dev enp3s0 INCOMPLETE") is None
@@ -710,7 +714,7 @@ git commit -m "docs: 構築・運用・利用者向けドキュメントの初�
 ### Task 14: AWS 側の構築（管理者が実行、エージェントは手順の案内と結果確認）
 
 - [ ] **Step 1: 管理者が `docs/setup.md` の ①〜③ を実施する**（AWS 管理者の認証情報が必要なため、エージェントは実行しない。lock ファイルは Task 12 Step 5b でコミット済みであること）
-- [ ] **Step 2: 公開ログの抑止を確認する** — 一時ブランチで `infra/terraform` に構文は正しいが plan で失敗する変更（存在しない IAM ポリシー名の data ソース等）を入れた PR を作り、`terraform-plan` のログとジョブサマリーに Terraform の出力本文・URL・アカウント ID が出ず、「失敗したコマンド名と終了コード」だけが出ることを確認してから PR を閉じる。
+- [ ] **Step 2: 公開ログの抑止を確認する** — Task 12 Step 6 の PR ブランチ（ワークフローを含む）から一時ブランチを作り、`infra/terraform` に構文は正しいが plan で失敗する変更（存在しない IAM ポリシー名の data ソース等）を入れて main 向けの PR を作る（`pull_request` イベントでは PR 側のワークフロー定義が使われるため、main にワークフローが無くても動く）。`terraform-plan` のログとジョブサマリーに Terraform の出力本文・URL・アカウント ID が出ず、「失敗したコマンド名と終了コード」だけが出ることを確認してから PR を閉じる。
 - [ ] **Step 3: Task 12 Step 6 の PR を main にマージし、初回 apply を承認する（管理者）** — bootstrap と GitHub 側の保護設定（Step 1）、ログ抑止の確認（Step 2）、PR の `ci` 成功がそろってからマージする（それより前にマージすると、main への push で起動した apply がロールを引き受けられず失敗する）。マージで起動した `terraform-apply` を初回 apply として扱い、Environment `production` で承認する。`workflow_dispatch` は使わない。
 
 Run: `gh run list --workflow terraform-apply.yml --limit 1`
@@ -749,7 +753,7 @@ Run（管理者）: `sudo nft list table inet craftlatch` と `systemctl status 
 Expected: 設計書 6.1 のルールが並び、`active (exited)`。
 
 続けて、LAN から認証して Minecraft を起動し（`ss -tlnp | grep 25565` で待ち受けを確認）、**認証していない外部回線**から `nc -vz -w 5 <グローバルIP> 25565` と Bedrock 版クライアントでの接続を試す。
-Expected: どちらも接続できず、`sudo nft list chain inet craftlatch input` の `tcp dport 25565 counter drop` と `udp dport 19132 counter drop` のカウンタが試行の前後で増える。
+Expected: どちらも接続できず、`sudo nft list chain inet craftlatch input` の `tcp dport 25565 counter drop` と `udp dport 19132 counter drop` のカウンタが試行の前後で増える。また、この起動で `minecraft.service` の `ExecStartPre`（fwcheck）が `RestrictNamespaces=yes` 等の制限下で成功していること（`journalctl -u minecraft -b | grep -i fwcheck` にエラーが無く、`systemctl status minecraft` が active）を確認する。
 
 - [ ] **Step 3: 正常系と期限の延長を確認する** — 外部回線の端末でログイン → 1〜2 分で `sudo nft list set inet craftlatch allow4` に IP が現れる → Java 版で接続し、12 分以上プレイを続けても切断されず、その間 `expires` が 10 分近くに戻り続けることを数回確認する → Bedrock 版でも同じことを確認する（UDP の期限延長）→ 切断後 10 分で set から消える。
 
