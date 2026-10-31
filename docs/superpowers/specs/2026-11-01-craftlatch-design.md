@@ -74,34 +74,108 @@
 
 ## 3. 全体構成
 
-```
-[ブラウザ] ──HTTPS(IPv4のみ)──> [API Gateway HTTP API: craftlatch-api]
-     │                                   │
-     │                                   ▼
-     │                         [Lambda: craftlatch-auth]
-     │                           /login    : state・nonce・PKCE を生成し Cookie に保存 → authorize へ 302
-     └──> [Cognito Managed Login]          /callback : state 照合、トークン交換、クレーム検証、sourceIp 取得
-          (craftlatch-users, prompt=login)   │
-                                             ▼ SendMessage
-                                   [SQS Standard: craftlatch-grants]
-                                             ▲ ReceiveMessage / DeleteMessage（IAM ユーザー craftlatch-host）
-─────────────── 自宅 Ubuntu ──────────────────┼────────────────────────────────
- craftlatch-poll.timer (毎分) → craftlatch-poll.service [craftlatch / 特権なし]
-                                   │ 検証済み要求を配置
-                                   ▼
-                        /run/craftlatch/requests/*.req
-                                   ▲                         │ craftlatch-apply.path が検知
- craftlatch-idle.timer (MC 稼働中のみ毎分)                    ▼
-   → craftlatch-idle.service [craftlatch]          craftlatch-apply.service [root / CAP_NET_ADMIN のみ]
-     SLP で人数取得、15 分無人なら stop 要求          ├─ nft: allow4 に IP を登録（timeout 10m）
-                                                     └─ systemctl start|stop --no-block minecraft.service
- nftables table inet craftlatch:
-   TCP/25565・UDP/19132 → allow4 に登録済みなら update(10m) して accept / それ以外は drop
- minecraft.service [minecraft]: stdin = minecraft.socket (FIFO)、ExecStop で "stop" を書き込む
- 各ユニットの OnFailure= → craftlatch-notify@.service → Discord Webhook
+```mermaid
+flowchart TB
+    browser["ブラウザ（利用者）"]
+    player["Minecraft クライアント<br/>Java / Bedrock"]
+    discord["Discord Webhook"]
+
+    subgraph aws["AWS（ap-northeast-1）"]
+        apigw["API Gateway HTTP API<br/>craftlatch-api（IPv4 のみ）"]
+        lambda["Lambda: craftlatch-auth<br/>/login: state・nonce・PKCE を Cookie に保存<br/>/callback: state 照合・トークン交換・クレーム検証・sourceIp 取得"]
+        cognito["Cognito Managed Login<br/>craftlatch-users（prompt=login）"]
+        sqs[("SQS Standard<br/>craftlatch-grants<br/>保持 600 秒")]
+    end
+
+    subgraph host["自宅 Ubuntu"]
+        subgraph unpriv["非特権（ユーザー craftlatch）"]
+            pollTimer["craftlatch-poll.timer<br/>毎分"]
+            poll["craftlatch-poll.service<br/>SQS 受信・検証"]
+            idleTimer["craftlatch-idle.timer<br/>Minecraft 稼働中のみ毎分"]
+            idle["craftlatch-idle.service<br/>SLP で人数取得<br/>15 分無人なら stop 要求"]
+        end
+        requests[("/run/craftlatch/requests/*.req")]
+        state[("/run/craftlatch/state/<br/>last-allow・seen.json")]
+        subgraph priv["root（CAP_NET_ADMIN のみ）"]
+            applyPath["craftlatch-apply.path"]
+            apply["craftlatch-apply.service<br/>要求の再検証・適用"]
+        end
+        nft{{"nftables table inet craftlatch<br/>allow4 登録済み: 期限を 10 分に更新して accept<br/>未登録: drop"}}
+        subgraph mc["ユーザー minecraft"]
+            minecraft["minecraft.service<br/>Paper + Geyser + Floodgate"]
+            fifo[("minecraft.socket<br/>FIFO: /run/minecraft.console")]
+        end
+        notify["craftlatch-notify@.service"]
+    end
+
+    browser -- "① /login・/callback" --> apigw
+    apigw --> lambda
+    browser -- "② ID・パスワード入力" --> cognito
+    lambda -- "トークン交換" --> cognito
+    lambda -- "③ SendMessage" --> sqs
+    pollTimer --> poll
+    poll -- "④ ReceiveMessage / DeleteMessage<br/>（IAM ユーザー craftlatch-host）" --> sqs
+    poll -- "⑤ allow 要求を配置" --> requests
+    idleTimer --> idle
+    idle -- "SLP（localhost:25565）" --> minecraft
+    idle -- "stop 要求を配置" --> requests
+    idle -. "読み取り" .-> state
+    requests -. "検知" .-> applyPath
+    applyPath --> apply
+    apply -- "読み取り・削除" --> requests
+    apply -- "⑥ IP を登録（timeout 10m）" --> nft
+    apply -- "⑦ systemctl start / stop --no-block" --> minecraft
+    apply --> state
+    minecraft -- "ExecStop で stop を書き込み" --> fifo
+    fifo -- "stdin" --> minecraft
+    player -- "TCP/25565・UDP/19132" --> nft
+    nft -- "許可 IP のみ" --> minecraft
+    poll & apply & applyPath & idle & minecraft -. "OnFailure=" .-> notify
+    notify -- "HTTPS" --> discord
 ```
 
 ### 3.1 正常時のシーケンス
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 利用者（ブラウザ）
+    participant API as API Gateway + Lambda<br/>craftlatch-auth
+    participant C as Cognito<br/>Managed Login
+    participant Q as SQS<br/>craftlatch-grants
+    participant P as craftlatch-poll
+    participant A as craftlatch-apply
+    participant N as nftables
+    participant M as minecraft.service
+    participant I as craftlatch-idle
+
+    U->>API: GET /login
+    API-->>U: 302 authorize（state・nonce・PKCE、prompt=login）<br/>Set-Cookie __Host-craftlatch
+    U->>C: ID・パスワード入力
+    C-->>U: 302 /callback?code&state
+    U->>API: GET /callback
+    API->>C: POST /oauth2/token（code + code_verifier）
+    C-->>API: ID トークン
+    API->>API: state・nonce・auth_time・グループ・sourceIp を検証
+    API->>Q: SendMessage（ip・iat・exp・id・user）
+    API-->>U: 完了ページ（登録 IP を表示）
+    loop 毎分
+        P->>Q: ReceiveMessage
+    end
+    Q-->>P: 許可イベント
+    P->>P: 検証し要求ファイルを配置
+    P->>Q: DeleteMessage
+    Note over A: path unit が要求ファイルを検知して起動
+    A->>A: 要求を再検証
+    A->>N: allow4 に IP を登録（timeout 10m）
+    A->>M: systemctl start --no-block（起動済みなら無操作）
+    Note over N,M: 以降、許可 IP からのパケットごとに期限を 10 分に更新
+    loop Minecraft 稼働中は毎分
+        I->>M: SLP で人数取得
+    end
+    I->>A: 15 分無人なら stop 要求を配置
+    A->>M: systemctl stop --no-block（FIFO 経由で stop を送り保存後に終了）
+```
 
 1. 利用者が `https://<api-id>.execute-api.ap-northeast-1.amazonaws.com/login` を開く。
 2. Lambda が state・nonce・code_verifier を生成し、`__Host-craftlatch` Cookie に保存して Cognito の authorize エンドポイントへ 302 リダイレクトする（`prompt=login`、`code_challenge_method=S256`）。
