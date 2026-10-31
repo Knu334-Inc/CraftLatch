@@ -28,3 +28,14 @@ Thumbs.db
 
 # SSH
 .ssh/
+
+# Python / uv
+.venv/
+__pycache__/
+.pytest_cache/
+*.zip
+
+# Terraform
+.terraform/
+*.tfstate*
+tfplan*
