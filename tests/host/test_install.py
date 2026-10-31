@@ -64,7 +64,7 @@ def test_existing_config_and_secrets_untouched_and_guidance_on_update(env):
     assert "操作不要（次回の実行から反映）" in r.stdout
     assert "sudo systemctl restart craftlatch-poll.timer" in r.stdout
     assert "restart minecraft" not in r.stdout
-    assert "minecraft.service の変更: 次回の起動から反映" in r.stdout
+    assert "minecraft.service / minecraft.socket の変更: 次回の起動から反映" in r.stdout
 
 
 def test_no_change_on_second_run(env):
@@ -73,6 +73,56 @@ def test_no_change_on_second_run(env):
     (root / "etc/craftlatch/craftlatch.nft").write_text("x")
     r = run(e)
     assert "変更はありません" in r.stdout
+
+
+def _prepare_installed(env):
+    e, root, _ = env
+    assert run(e).returncode == 0
+    (root / "etc/craftlatch/craftlatch.nft").write_text("x")  # 初回ではない状態にする
+    return e, root
+
+
+def test_guidance_mapping_per_unit(env):
+    e, root = _prepare_installed(env)
+    unit = root / "etc/systemd/system"
+    for name in ("craftlatch-poll.service", "craftlatch-poll.timer", "craftlatch-apply.service",
+                 "craftlatch-apply.path", "craftlatch-idle.service", "craftlatch-idle.timer",
+                 "craftlatch-notify@.service"):
+        (unit / name).write_text("old")
+    r = run(e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count("sudo systemctl restart craftlatch-poll.timer") == 1
+    assert r.stdout.count("sudo systemctl restart craftlatch-apply.path") == 1
+    assert "restart craftlatch-idle" not in r.stdout
+    assert "restart craftlatch-poll.service" not in r.stdout
+    assert "craftlatch-idle の変更: 次回の Minecraft 起動から反映" in r.stdout
+    assert "操作不要（次回の通知から反映）" in r.stdout
+    assert "craftlatch-firewall" not in r.stdout
+
+
+def test_firewall_unit_change_prints_restart_with_warning(env):
+    e, root = _prepare_installed(env)
+    (root / "etc/systemd/system/craftlatch-firewall.service").write_text("old")
+    r = run(e)
+    assert r.stdout.count("sudo systemctl restart craftlatch-firewall.service") == 1
+    assert "許可リストが空" in r.stdout
+
+
+def test_guidance_survives_failure_after_placement(env):
+    e, root = _prepare_installed(env)
+    (root / "etc/systemd/system/craftlatch-apply.service").write_text("old")
+    (root / "usr/local/lib/craftlatch/poll.py").write_text("old")
+    pending = root / "etc/craftlatch/.install-pending"
+    r = run(e | {"FAKE_RC": "1"})  # 配置後の routermac で失敗する
+    assert r.returncode == 1
+    assert pending.is_file() and stat.S_IMODE(pending.stat().st_mode) == 0o600
+    r = run(e)
+    assert r.returncode == 0, r.stderr
+    assert "sudo systemctl restart craftlatch-apply.path" in r.stdout
+    assert "操作不要（次回の実行から反映）" in r.stdout
+    assert "変更はありません" not in r.stdout
+    assert not pending.exists()
+    assert "変更はありません" in run(e).stdout
 
 
 def test_routermac_failure_exits_1(env):

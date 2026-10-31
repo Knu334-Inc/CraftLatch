@@ -35,7 +35,9 @@ case "$*" in
     [ "${{FAKE_ACTIVE:-inactive}}" = inactive ] && exit 3
     exit 0 ;;
   "start craftlatch-poll.service")
-    if [ "$(cat "@MODE@" 2>/dev/null)" = receive ] && grep -q {NEW} "$CRAFTLATCH_ETC/aws-credentials"; then
+    if [ "$(cat "@MODE@" 2>/dev/null)" = receive_both ]; then
+      echo 1 > "$CRAFTLATCH_STATE/poll-failures"
+    elif [ "$(cat "@MODE@" 2>/dev/null)" = receive ] && grep -q {NEW} "$CRAFTLATCH_ETC/aws-credentials"; then
       echo 1 > "$CRAFTLATCH_STATE/poll-failures"
     else
       echo 0 > "$CRAFTLATCH_STATE/poll-failures"
@@ -160,7 +162,9 @@ def test_c_old_key_delete_failure_keeps_new_and_finish_completes(sandbox):
 
 
 def test_finish_treats_nosuchentity_as_done(sandbox):
-    env, _, _, _ = sandbox
+    env, etc, _, _ = sandbox
+    (etc / "aws-credentials").chmod(0o600)
+    (etc / "aws-credentials").write_text(f"[default]\naws_access_key_id = {NEW}\n")
     r = run(env | {"FAKE_FAIL": "nosuch_old"}, "--finish", OLD)
     assert r.returncode == 0, r.stderr
 
@@ -181,3 +185,22 @@ def test_poll_wait_timeout_recovers_before_switch(sandbox):
     assert has(log, f"delete-access-key --user-name craftlatch-host --access-key-id {NEW}")
     assert has(log, "systemctl start craftlatch-poll.timer")
     assert not has(log, "start craftlatch-poll.service")
+
+
+def test_b2_old_key_also_failing_warns_but_restarts_timer_and_deletes_new(sandbox):
+    env, etc, _, log = sandbox
+    before = (etc / "aws-credentials").read_text()
+    r = run(env | {"FAKE_FAIL": "receive_both"})
+    assert r.returncode == 1
+    assert (etc / "aws-credentials").read_text() == before
+    assert "旧キーでも受信に失敗" in r.stderr
+    assert has(log, "systemctl start craftlatch-poll.timer")
+    assert has(log, f"delete-access-key --user-name craftlatch-host --access-key-id {NEW}")
+
+
+def test_finish_refuses_the_active_key_before_any_iam_call(sandbox):
+    env, _, _, log = sandbox
+    r = run(env, "--finish", OLD)  # OLD は現行の aws-credentials のキー
+    assert r.returncode == 1
+    assert "使用中" in r.stderr
+    assert not has(log, "aws iam")

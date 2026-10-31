@@ -59,6 +59,18 @@ fi
 
 aws_bin=$(command -v "$AWS_CLI") || die "aws CLI が見つかりません: $AWS_CLI"
 
+# 現行の aws-credentials のキー ID を表示する
+current_key_id() {
+    sed -n 's/^aws_access_key_id[[:space:]]*=[[:space:]]*//p' "$cred" | head -n1 | tr -d '[:space:]'
+}
+
+# poll-failures が 0 であること（受信に成功したこと）を確認する
+poll_succeeded() {
+    local v=""
+    read -r v <"$CRAFTLATCH_STATE/poll-failures" 2>/dev/null || v=""
+    [ "$v" = "0" ]
+}
+
 # ---- 手順 6: 確定後の整理（何度実行しても同じ結果になる） ----
 
 # 失敗した作業名を表示して終了コード 1 で終了する。確定後は新しいキーを削除しない。
@@ -82,6 +94,10 @@ iam_idempotent() {
 
 finish_steps() {
     local today
+    # 現用のキーを無効化・削除してしまう誤指定を、IAM を呼ぶ前に防ぐ
+    if [ "$(current_key_id)" = "$old_id" ]; then
+        die "失敗: $old_id は現在使用中のキーです。何も実行しませんでした"
+    fi
     today=$(date +%F)
     (umask 022 && printf '%s\n' "$today" >"$cred_rotated") || commit_fail "aws-credentials.rotated の更新"
     chmod 0644 -- "$cred_rotated" || commit_fail "aws-credentials.rotated の更新"
@@ -114,11 +130,12 @@ recover() {
     echo "失敗: $1。変更を元に戻します" >&2
     if [ "$switched" -eq 1 ]; then
         mv -- "$cred_old" "$cred" || echo "警告: aws-credentials.old を戻せませんでした" >&2
-        if "$SYSTEMCTL" start craftlatch-poll.service; then
-            "$SYSTEMCTL" start craftlatch-poll.timer || echo "警告: craftlatch-poll.timer を再開できませんでした" >&2
+        if "$SYSTEMCTL" start craftlatch-poll.service && poll_succeeded; then
+            echo "旧キーでの受信を確認しました" >&2
         else
-            echo "警告: 旧キーでの受信に失敗しました。craftlatch-poll.timer は再開していません" >&2
+            echo "警告: 旧キーでも受信に失敗しました（新旧どちらのキーも使えません）。手動で原因を調べてください" >&2
         fi
+        "$SYSTEMCTL" start craftlatch-poll.timer || echo "警告: craftlatch-poll.timer を再開できませんでした" >&2
     elif [ "$timer_stopped" -eq 1 ]; then
         "$SYSTEMCTL" start craftlatch-poll.timer || echo "警告: craftlatch-poll.timer を再開できませんでした" >&2
     fi
@@ -195,9 +212,7 @@ mv -- "$cred_new" "$cred" || recover "aws-credentials の切り替え"
 
 # 手順 5: 新しいキーで受信できることを確認する
 "$SYSTEMCTL" start craftlatch-poll.service || recover "新しいキーでの craftlatch-poll.service の実行"
-failures=""
-read -r failures <"$CRAFTLATCH_STATE/poll-failures" 2>/dev/null || failures=""
-[ "$failures" = "0" ] || recover "新しいキーでの受信確認(poll-failures が 0 ではありません)"
+poll_succeeded || recover "新しいキーでの受信確認(poll-failures が 0 ではありません)"
 
 # 手順 6: ここが確定点。以降は新しいキーを削除しない
 finish_steps

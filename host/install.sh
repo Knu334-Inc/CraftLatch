@@ -83,32 +83,77 @@ first_install=0
 [ -e "$nft_path" ] || first_install=1
 
 py_changed=0
+nft_changed=0
 changed_units=()
+pending_path="$etc_dir/.install-pending"
 
-# place <モード> <元> <先> <種別: py|unit>
-place() {
-    local mode="$1" src="$2" dst="$3" kind="$4"
-    if [ ! -e "$dst" ] || ! cmp -s -- "$src" "$dst"; then
-        case "$kind" in
-            py) py_changed=1 ;;
-            unit) changed_units+=("$(basename -- "$dst")") ;;
-        esac
-    fi
-    install "${owner_args[@]}" -m "$mode" -- "$src" "$dst"
+# 前回の実行が途中で失敗していた場合、その検出結果を引き継ぐ
+add_unit() {
+    local u
+    for u in ${changed_units[@]+"${changed_units[@]}"}; do
+        [ "$u" = "$1" ] && return 0
+    done
+    changed_units+=("$1")
 }
+
+load_pending() {
+    local line
+    [ -f "$pending_path" ] || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            py) py_changed=1 ;;
+            nft) nft_changed=1 ;;
+            unit:*) add_unit "${line#unit:}" ;;
+        esac
+    done <"$pending_path"
+}
+
+# 検出結果を配置前に保存する（以降の処理が失敗しても案内を失わないため）
+save_pending() {
+    local u
+    (
+        umask 077
+        {
+            [ "$py_changed" -eq 1 ] && echo py
+            [ "$nft_changed" -eq 1 ] && echo nft
+            for u in ${changed_units[@]+"${changed_units[@]}"}; do echo "unit:$u"; done
+            true
+        } >"$pending_path"
+    )
+    chmod 0600 -- "$pending_path"
+}
+
+# 配置対象: モード|元|先|種別(py|unit)
+entries=()
+for f in "$host_dir"/lib/*.py "$host_dir"/lib/fwcheck-expected.json; do
+    entries+=("0644|$f|$lib_dir/$(basename -- "$f")|py")
+done
+for f in fwcheck mc-stop; do
+    entries+=("0755|$host_dir/lib/$f|$lib_dir/$f|py")
+done
+for f in "$host_dir"/systemd/*; do
+    entries+=("0644|$f|$unit_dir/$(basename -- "$f")|unit")
+done
+entries+=("0644|$host_dir/tmpfiles.d/craftlatch.conf|$tmpfiles_dir/craftlatch.conf|py")
 
 install "${owner_args[@]}" -d -m 0755 -- "$lib_dir" "$unit_dir" "$tmpfiles_dir" "$etc_dir"
 
-for f in "$host_dir"/lib/*.py "$host_dir"/lib/fwcheck-expected.json; do
-    place 0644 "$f" "$lib_dir/$(basename -- "$f")" py
+load_pending
+for e in "${entries[@]}"; do
+    IFS='|' read -r _ src dst kind <<<"$e"
+    if [ ! -e "$dst" ] || ! cmp -s -- "$src" "$dst"; then
+        case "$kind" in
+            py) py_changed=1 ;;
+            unit) add_unit "$(basename -- "$dst")" ;;
+        esac
+    fi
 done
-for f in fwcheck mc-stop; do
-    place 0755 "$host_dir/lib/$f" "$lib_dir/$f" py
+save_pending
+
+for e in "${entries[@]}"; do
+    IFS='|' read -r mode src dst _ <<<"$e"
+    install "${owner_args[@]}" -m "$mode" -- "$src" "$dst"
 done
-for f in "$host_dir"/systemd/*; do
-    place 0644 "$f" "$unit_dir/$(basename -- "$f")" unit
-done
-place 0644 "$host_dir/tmpfiles.d/craftlatch.conf" "$tmpfiles_dir/craftlatch.conf" py
 
 # ---- 設定（既存の config.json・aws-credentials・discord-webhook には触れない） ----
 if [ ! -e "$config_path" ]; then
@@ -126,7 +171,6 @@ if ! "$python3_bin" -E -s "$lib_dir/routermac.py" "${mac_args[@]}"; then
 fi
 
 # ---- nft ルール ----
-nft_changed=0
 if [ "$test_mode" -eq 1 ]; then
     echo "[テストモード] 実行しない: python3 -E -s $lib_dir/nftgen.py --output $nft_path"
 else
@@ -141,7 +185,10 @@ else
     if [ -e "$nft_path" ] && cmp -s -- "$nft_new" "$nft_path"; then
         rm -f -- "$nft_new"
     else
-        [ "$first_install" -eq 1 ] || nft_changed=1
+        if [ "$first_install" -eq 0 ]; then
+            nft_changed=1
+            save_pending
+        fi
         chmod 0644 -- "$nft_new"
         mv -- "$nft_new" "$nft_path"
     fi
@@ -164,36 +211,48 @@ if [ "$first_install" -eq 1 ]; then
     echo "  sudo systemctl enable --now craftlatch-firewall.service"
     echo "  sudo systemctl enable --now craftlatch-apply.path craftlatch-poll.timer"
     echo "  sudo systemctl enable craftlatch-idle.timer"
+    rm -f -- "$pending_path"
     exit 0
 fi
 
-step=0
 restart_firewall=$nft_changed
+restart_poll=0
+restart_apply=0
+note_idle=0
+note_notify=0
+note_mc=0
+for u in ${changed_units[@]+"${changed_units[@]}"}; do
+    case "$u" in
+        craftlatch-poll.service | craftlatch-poll.timer) restart_poll=1 ;;
+        craftlatch-apply.service | craftlatch-apply.path) restart_apply=1 ;;
+        craftlatch-idle.service | craftlatch-idle.timer) note_idle=1 ;;
+        craftlatch-notify@.service) note_notify=1 ;;
+        minecraft.service | minecraft.socket) note_mc=1 ;;
+        craftlatch-firewall.service) restart_firewall=1 ;;
+    esac
+done
+
+step=0
 if [ "$py_changed" -eq 1 ]; then
     echo "Python スクリプト等の変更: 操作不要（次回の実行から反映）"
 fi
-for u in ${changed_units[@]+"${changed_units[@]}"}; do
-    case "$u" in
-        minecraft.service | minecraft.socket)
-            echo "$u の変更: 次回の起動から反映されます（再起動は案内しません）"
-            ;;
-        craftlatch-notify@.service)
-            echo "$u の変更: 操作不要（次回の失敗通知から反映）"
-            ;;
-        craftlatch-firewall.service)
-            restart_firewall=1
-            ;;
-        *)
-            step=$((step + 1))
-            echo "$step. sudo systemctl restart $u"
-            ;;
-    esac
-done
+if [ "$restart_poll" -eq 1 ]; then
+    step=$((step + 1))
+    echo "$step. sudo systemctl restart craftlatch-poll.timer"
+fi
+if [ "$restart_apply" -eq 1 ]; then
+    step=$((step + 1))
+    echo "$step. sudo systemctl restart craftlatch-apply.path"
+fi
 if [ "$restart_firewall" -eq 1 ]; then
     step=$((step + 1))
     echo "$step. sudo systemctl restart craftlatch-firewall.service"
     echo "   警告: Minecraft が停止し、許可リストが空になります。次の認証で Minecraft が起動します（手動なら sudo systemctl start minecraft.service）。"
 fi
-if [ "$py_changed" -eq 0 ] && [ "$step" -eq 0 ] && [ "${#changed_units[@]}" -eq 0 ]; then
+[ "$note_idle" -eq 1 ] && echo "craftlatch-idle の変更: 次回の Minecraft 起動から反映"
+[ "$note_notify" -eq 1 ] && echo "craftlatch-notify@.service の変更: 操作不要（次回の通知から反映）"
+[ "$note_mc" -eq 1 ] && echo "minecraft.service / minecraft.socket の変更: 次回の起動から反映"
+if [ "$py_changed" -eq 0 ] && [ "${#changed_units[@]}" -eq 0 ] && [ "$nft_changed" -eq 0 ]; then
     echo "変更はありません。"
 fi
+rm -f -- "$pending_path"
