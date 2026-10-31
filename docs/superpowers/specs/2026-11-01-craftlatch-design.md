@@ -210,7 +210,7 @@ sequenceDiagram
 
 ```
 infra/bootstrap/          GitHub OIDC プロバイダー・GHA 用 IAM ロール・Permissions Boundary（管理者が手元で 1 回だけ実行）
-infra/terraform/          versions.tf backend.tf variables.tf cognito.tf api.tf lambda.tf sqs.tf iam.tf budgets.tf outputs.tf
+infra/terraform/          versions.tf backend.tf variables.tf cognito.tf api.tf lambda.tf sqs.tf iam.tf outputs.tf
 src/lambda/craftlatch_auth/handler.py
 host/lib/                 common.py poll.py apply.py idle.py notify.py fwcheck mc-stop
 host/systemd/             *.service *.timer *.path *.socket
@@ -351,19 +351,15 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 - アクセスキーは Terraform では作らない（state にシークレットが残るため）。発行は CLI で行う: `aws iam create-access-key --user-name craftlatch-host`
 - このキーが漏えいしても、許可イベントの偽造（`SendMessage`）はできない。被害は「利用者名と IP の閲覧」と「許可イベントの削除による妨害」に限られる。
 
-Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`、`craftlatch-host`）には、Permissions Boundary `craftlatch-boundary` を付ける（4.8 の apply ロールの権限昇格対策）。Boundary は CloudWatch Logs（`craftlatch-*` のロググループへの書き込み）と SQS（`craftlatch-grants` への `SendMessage`・`ReceiveMessage`・`DeleteMessage`）の操作だけを上限として許可する。権限はインラインポリシーで付与する（4.8 で `iam:Attach*` を許可しないため）。
+Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`、`craftlatch-host`）には、Permissions Boundary `craftlatch-boundary` を付ける（4.7 の apply ロールの権限昇格対策）。Boundary は CloudWatch Logs（`craftlatch-*` のロググループへの書き込み）と SQS（`craftlatch-grants` への `SendMessage`・`ReceiveMessage`・`DeleteMessage`）の操作だけを上限として許可する。権限はインラインポリシーで付与する（4.7 で `iam:Attach*` を許可しないため）。
 
-### 4.6 AWS Budgets
-
-月額 $1 のコスト予算を作成し、実績が 100% を超えたら管理者のメールに通知する（Terraform の `aws_budgets_budget`）。
-
-### 4.7 Terraform
+### 4.6 Terraform
 
 - Terraform 1.10 以上（S3 ネイティブロック `use_lockfile` のため）で、バージョンを固定する。プロバイダー（`hashicorp/aws`、`hashicorp/archive`）は `~> <メジャー>.<マイナー>` で制約し、`infra/terraform/` と `infra/bootstrap/` の `.terraform.lock.hcl` をコミットする。CI は `terraform init -lockfile=readonly` を使い、プロバイダーの更新は明示的な PR で行う。
 - ルートモジュール 1 つ。モジュール分割はしない。
-- 変数: `region`、`project`（既定 `craftlatch`）、`cognito_domain_prefix`。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。Budgets の通知先メールは変数にせず、bootstrap が作成する SSM パラメーター `/craftlatch/budget-email`（`String`）を `data "aws_ssm_parameter"` で読む（PR の plan でも値が得られ、GitHub にメールアドレスを置かずに済むため）。
+- 変数: `region`、`project`（既定 `craftlatch`）、`cognito_domain_prefix`。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。
 - CI では常に `-input=false` を付ける。
-- 実行は GitHub Actions（4.8）。管理者が手元で実行するのは、`infra/bootstrap/` の適用（初回および変更・復旧時）と、詳細な差分確認のための `terraform plan` のみ。
+- 実行は GitHub Actions（4.7）。管理者が手元で実行するのは、`infra/bootstrap/` の適用（初回および変更・復旧時）と、詳細な差分確認のための `terraform plan` のみ。
 - Lambda のコードのデプロイも Terraform で行う。`archive_file` データソースで `src/lambda/craftlatch_auth/` を ZIP にし（`__pycache__`・テストは除外。外部ライブラリがないため `pip install` 等のビルド工程はない）、`aws_lambda_function` の `filename` と `source_code_hash` に渡す。コードが変わればハッシュが変わり、apply で Lambda が更新される。
 - 出力: ログイン URL、User Pool ID、キュー URL、`craftlatch-host` の ARN。
 - 実装時に確認する事項: Cognito のプラン指定（`user_pool_tier`）と HTTP API の `ip_address_type` の引数名・対応プロバイダーバージョン。
@@ -391,7 +387,7 @@ terraform {
 
 state に秘密情報は含めない（アクセスキー・Discord Webhook URL は Terraform 管理外）。
 
-### 4.8 GitHub Actions による実行
+### 4.7 GitHub Actions による実行
 
 #### 認証（GitHub OIDC）
 
@@ -412,8 +408,7 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 
 **plan ロールの権限**
 
-- 管理対象サービス（Cognito、API Gateway、Lambda、SQS、IAM、CloudWatch Logs、Budgets）の `Describe*`・`Get*`・`List*` 系の読み取り。SQS のメッセージ受信（`sqs:ReceiveMessage`）は含めない。
-- SSM パラメーター `/craftlatch/budget-email` の `ssm:GetParameter`。
+- 管理対象サービス（Cognito、API Gateway、Lambda、SQS、IAM、CloudWatch Logs）の `Describe*`・`Get*`・`List*` 系の読み取り。SQS のメッセージ受信（`sqs:ReceiveMessage`）は含めない。
 - 上記の state バケットの権限。
 
 **apply ロールの権限**（権限昇格を防ぐため、IAM 関連はステートメントを分ける）
@@ -425,12 +420,12 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 | ロールの受け渡し | `iam:PassRole` | 対象は `role/craftlatch-auth-role` の ARN のみ。条件 `iam:PassedToService = lambda.amazonaws.com` |
 | 明示的な拒否 | `iam:DeleteRolePermissionsBoundary`、`iam:DeleteUserPermissionsBoundary`、`iam:PutRolePermissionsBoundary`、`iam:PutUserPermissionsBoundary` | すべてのリソース（Boundary の削除・付け替えを禁止） |
 | 明示的な拒否 | IAM の全書き込みアクション（`iam:Create*`・`iam:Put*`・`iam:Update*`・`iam:Delete*`・`iam:Attach*`・`iam:Detach*`・`iam:SetDefaultPolicyVersion`・`iam:Tag*`・`iam:Untag*` 等） | `role/craftlatch-gha-*`、`policy/craftlatch-boundary`、OIDC プロバイダー（GHA 用ロール・Boundary・ポリシーバージョンの変更を禁止） |
-| アプリケーションのリソース | Cognito・API Gateway・Lambda・SQS・CloudWatch Logs・Budgets の作成・変更・削除 | 名前またはタグ `Project=CraftLatch` で `craftlatch-*` のリソースに限定（サービスごとに ARN・条件の書き方が異なるため、具体的なポリシーは実装時に U11 で検証する） |
-| その他 | SSM パラメーター `/craftlatch/budget-email` の `ssm:GetParameter`、上記の state バケットの権限 | — |
+| アプリケーションのリソース | Cognito・API Gateway・Lambda・SQS・CloudWatch Logs の作成・変更・削除 | 名前またはタグ `Project=CraftLatch` で `craftlatch-*` のリソースに限定（サービスごとに ARN・条件の書き方が異なるため、具体的なポリシーは実装時に U11 で検証する） |
+| その他 | 上記の state バケットの権限 | — |
 
 **bootstrap（`infra/bootstrap/`）**
 
-- OIDC プロバイダー・2 つの GHA ロール・Boundary・SSM パラメーター `/craftlatch/budget-email` を管理する。GHA が動く前に必要で、かつ通常の apply ロールからは変更できないため、**初回および変更・復旧時に管理者が手元から実行する**。
+- OIDC プロバイダー・2 つの GHA ロール・Boundary を管理する。GHA が動く前に必要で、かつ通常の apply ロールからは変更できないため、**初回および変更・復旧時に管理者が手元から実行する**。
 - 管理者は GHA ロールとは別の管理者用の認証情報（`AWS_PROFILE` 等）を使う。
 - backend は部分設定で、`terraform init -backend-config="bucket=<バケット名>" -backend-config="key=bootstrap/terraform.tfstate"` で初期化する。
 - 手順: `terraform init` → `terraform plan` で差分を確認 → `terraform apply` → GitHub Actions の plan・apply が引き続きロールを引き受けられることを確認（`workflow_dispatch` で apply ワークフローを実行し、差分がないことを確認）。手順は `docs/setup.md` と `docs/operations.md` に書く。
@@ -459,7 +454,6 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 | `TF_STATE_BUCKET` | Secret | state バケット名 |
 | `AWS_REGION` | Variable | `ap-northeast-1` |
 
-Budgets の通知先メールは GitHub に置かない（SSM パラメーターから読む。4.7）。
 
 #### 公開リポジトリであることへの対策
 
@@ -1166,7 +1160,6 @@ sudo systemctl enable craftlatch-idle.timer
 | CloudWatch Logs | 1 MB 未満 | 5 GB（期限なし） | $0 | 約 $0.50/GB（取り込み） |
 | S3（Terraform state） | 数 KB、数百リクエスト | — | $0.01 未満 | — |
 | IAM | — | 無料 | $0 | — |
-| AWS Budgets（監視予算 1 件） | — | 監視予算は無料 | $0 | — |
 | データ転送 | 数 MB | 毎月 100 GB | $0 | — |
 | GitHub Actions | PR・main への push ごとに数分 | 公開リポジトリの標準ランナーは無料 | $0 | — |
 | **合計** | | | **約 $0** | **無料枠を一切除いた場合: 約 $0.20/月**（Cognito 10 MAU × $0.015 = $0.15 が大半） |
