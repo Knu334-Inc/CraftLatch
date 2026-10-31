@@ -31,7 +31,8 @@ UNIT = "minecraft.service"
 
 
 def _log(line: str) -> None:
-    print(line, flush=True)
+    # 非 ASCII・surrogate でも例外を出さない
+    print(line.encode("ascii", "backslashreplace").decode("ascii"), flush=True)
 
 
 def default_runner(cmd: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -75,7 +76,7 @@ def _trim_quarantine(quarantine_dir: Path) -> None:
         try:
             p.unlink()
         except OSError as e:
-            _log(f"event=quarantine-trim-failed name={p.name} error={type(e).__name__}")
+            _log(f"event=quarantine-trim-failed name={p.name!r} error={type(e).__name__}")
 
 
 def _quarantine(path: Path, quarantine_dir: Path) -> bool:
@@ -92,7 +93,7 @@ def _quarantine(path: Path, quarantine_dir: Path) -> bool:
         path.unlink()
         return True
     except OSError as e:
-        _log(f"event=quarantine-failed name={path.name} error={type(e).__name__}")
+        _log(f"event=quarantine-failed name={path.name!r} error={type(e).__name__}")
         return False
 
 
@@ -117,7 +118,7 @@ def collect(requests_dir: Path, quarantine_dir: Path, expected_uid: int, now: in
             except FileNotFoundError:
                 pass
             except OSError as e:
-                _log(f"event=tmp-cleanup-failed name={name} error={type(e).__name__}")
+                _log(f"event=tmp-cleanup-failed name={name!r} error={type(e).__name__}")
                 failed = True
 
     req_names = [n for n in names if n.endswith(".req") and not n.startswith(".")]
@@ -126,7 +127,7 @@ def collect(requests_dir: Path, quarantine_dir: Path, expected_uid: int, now: in
         try:
             parsed = parse_request(read_request_file(path, expected_uid), now)
         except Exception as e:  # 1 件の失敗で他を止めない
-            _log(f"event=invalid-request name={name} reason={str(e)!r}")
+            _log(f"event=invalid-request name={name!r} reason={str(e)!r}")
             quarantined = True
             if not _quarantine(path, quarantine_dir):
                 failed = True
@@ -211,7 +212,7 @@ def _cleanup(paths: list[Path]) -> bool:
         except FileNotFoundError:
             pass
         except OSError as e:
-            _log(f"event=cleanup-failed name={p.name} error={type(e).__name__}")
+            _log(f"event=cleanup-failed name={p.name!r} error={type(e).__name__}")
             ok = False
     return ok
 

@@ -353,3 +353,35 @@ def test_poll_to_apply_integration(tmp_path):
     assert apply_batch(allows, stops, StateStore(st), Systemd(r), r, NOW) is True
     assert "8.8.8.8" in r.calls[0][1]
     assert "start" in r.kinds() and list(req.glob("*.req")) == []
+
+
+def _strict_stdout(monkeypatch):
+    import io
+    import sys
+
+    buf = io.BytesIO()
+    w = io.TextIOWrapper(buf, encoding="utf-8", errors="strict")
+    monkeypatch.setattr(sys, "stdout", w)
+    return w, buf
+
+
+def test_non_utf8_filename_does_not_crash_and_is_quarantined(tmp_path, monkeypatch):
+    req, q, _ = setup(tmp_path)
+    fd = os.open(os.fsencode(req) + b"/\xff.req", os.O_CREAT | os.O_WRONLY, 0o644)
+    os.write(fd, b"bad")
+    os.close(fd)
+    ok = put(req, "2-ok.req", allow_to_request(allow()))
+    w, buf = _strict_stdout(monkeypatch)
+    allows, stops, failed = collect(req, q, UID, NOW)
+    w.flush()
+    assert [x[0] for x in allows] == [ok] and failed is False
+    assert len(list(q.iterdir())) == 1 and [p.name for p in req.iterdir()] == ["2-ok.req"]
+    assert b"\\udcff" in buf.getvalue()
+
+
+def test_newline_in_filename_cannot_forge_log_lines(tmp_path, capsys):
+    req, q, _ = setup(tmp_path)
+    (req / "1-x\nevent=allow ip=1.1.1.1 nft=ok.req").write_text("bad")
+    collect(req, q, UID, NOW)
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("event=invalid-request")
