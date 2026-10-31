@@ -26,7 +26,7 @@
 ## Review Focus
 
 1. **同じブラウザで 2 つのタブからログインした場合**（Cookie の state が後勝ちで上書きされる）: 先に戻ったタブは「期限切れ・再ログイン」ページになり、例外や 500 にならないこと → Task 9 の `test_callback_state_mismatch_returns_relogin_page`。
-2. **`/etc/craftlatch/config.json` の欠落・破損**: poll・apply・idle は例外を握り潰さず終了コード 1（通知）、fwcheck は終了コード 1（Minecraft を起動させない）こと → Task 2 の `test_load_config_rejects_missing_and_invalid`、Task 6 の `test_main_fails_closed_on_bad_config`。
+2. **`/etc/craftlatch/config.json` の欠落・破損**: 設定を読む poll・idle は例外を握り潰さず終了コード 1（通知。apply は設定を使わない）、fwcheck は終了コード 1（Minecraft を起動させない）こと → Task 2 の `test_load_config_rejects_missing_and_invalid`、Task 6 の `test_main_fails_closed_on_bad_config`。
 3. **poll が書き込み途中で異常終了して残った `.tmp-*` ファイル**: apply は `.req` 以外を処理しないが、60 秒より古い `.tmp-*` は削除してたまり続けないこと → Task 4 の `test_collect_removes_stale_tmp_files`。
 4. **起動途中の Paper が返す不完全・異常な SLP 応答**（途中切断、長さ VarInt が不正、JSON でない）: idle は例外で落ちず「SLP 失敗＝0 人扱い」になること → Task 5 の `test_slp_truncated_and_garbage_responses_raise_slperror`。
 5. **Discord Webhook の障害（429・5xx・接続不可）**: notify は終了コード 1 を返し、送信履歴を更新しない（次の失敗時に再送を試みる）こと → Task 7 の `test_send_failure_does_not_record_and_returns_1`。
@@ -572,7 +572,8 @@ def test_callback_success_sends_message():
     # レスポンス 200・content-type text/html; charset=utf-8・本文に 8.8.8.8・Cookie 削除
 def test_callback_state_mismatch_returns_relogin_page(): ...   # Review Focus 1：200 か 400 の HTML、SQS 未送信
 @pytest.mark.parametrize("claim_patch,kind", [
-    ({"auth_time": now-121}, "relogin"), ({"auth_time": now+61}, "relogin"), ({"nonce": "x"}, "relogin"),
+    ({"auth_time": now-121}, "relogin"), ({"auth_time": now+61}, "relogin"), ({"auth_time": True}, "relogin"), ({"auth_time": "1793460000"}, "relogin"),
+    ({"iss": "https://cognito-idp.ap-northeast-1.amazonaws.com/other"}, "relogin"), ({"exp": now}, "relogin"), ({"nonce": "x"}, "relogin"),
     ({"aud": "other"}, "relogin"), ({"token_use": "access"}, "relogin"),
     ({"cognito:groups": ["other"]}, "forbidden"), ({"cognito:groups": "minecraft"}, "forbidden"),
     ({"cognito:username": "アリス"}, "account"),
@@ -584,7 +585,7 @@ def test_ignores_x_forwarded_for(): ...          # ヘッダーに別 IP があ�
 def test_unknown_route_404(): ...
 def test_zip_layout_importable(tmp_path):
     # Task 11 の archive_file と同じ規則（source_dir = src/lambda、__pycache__ と *.pyc を除外）で zipfile を作り、
-    # 展開先を sys.path にして importlib.import_module("craftlatch_auth.handler").lambda_handler が存在すること、
+    # 展開先だけを sys.path にした別プロセス（`subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, <展開先>); import craftlatch_auth.handler as h; assert h.__file__.startswith(<展開先>); assert callable(h.lambda_handler)"])`）で import できること（同じプロセスの sys.modules の影響を受けないようにする）、
     # ZIP 内のパスが "craftlatch_auth/handler.py" であること（ZIP 直下に handler.py が無いこと）
 def test_security_headers_present(): ...         # CSP default-src 'none'; style-src 'unsafe-inline'、no-store、no-referrer、nosniff
 ```
