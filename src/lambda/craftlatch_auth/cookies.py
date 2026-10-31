@@ -27,6 +27,9 @@ def decode(values: list[str]) -> dict | None:
         return None
     if not isinstance(data, dict) or set(data) != _KEYS:
         return None
-    if not all(isinstance(data[k], str) for k in "snv") or type(data["t"]) is not int:
+    if type(data["t"]) is not int:
+        return None
+    # token_urlsafe の出力は常に ASCII。孤立サロゲート等は拒否する
+    if not all(isinstance(data[k], str) and data[k] and data[k].isascii() for k in "snv"):
         return None
     return data

@@ -207,3 +207,28 @@ def test_zip_layout_importable(tmp_path):
             f"assert h.__file__.startswith({str(out)!r}); assert callable(h.lambda_handler)")
     r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("key", ["s", "n", "v"])
+@pytest.mark.parametrize("bad", ["\\ud800", "\\u3042"])
+def test_callback_bad_cookie_strings_relogin(ctx, key, bad):
+    from .helpers import b64
+    sqs, _ = ctx
+    d = {"s": STATE, "n": NONCE, "v": VER, "t": NOW}
+    parts = {k: json.dumps(v) for k, v in d.items()}
+    parts[key] = f'"{bad}"'
+    raw = "{" + ",".join(f'"{k}":{v}' for k, v in parts.items()) + "}"
+    ev = callback_event()
+    ev["cookies"] = ["__Host-craftlatch=" + b64(raw.encode())]
+    r = handler.lambda_handler(ev, None)
+    assert r["statusCode"] == 400
+    assert sqs.sent == []
+
+
+def test_unexpected_exception_returns_temporary(ctx, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(handler, "_callback", boom)
+    r = handler.lambda_handler(callback_event(), None)
+    assert r["statusCode"] == 503

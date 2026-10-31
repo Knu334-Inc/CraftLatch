@@ -101,7 +101,7 @@ def lambda_handler(event, context):
         return pages.not_found()
     try:
         s = settings.load()
+        return _login(s) if route == "GET /login" else _callback(event, s)
     except Exception as e:
         logger.error("event=error type=%s", type(e).__name__)
         return pages.render("temporary")
-    return _login(s) if route == "GET /login" else _callback(event, s)

@@ -21,3 +21,9 @@ def test_last_wins_and_malformed():
                 b'{"s":"a","n":"b","v":"c","t":true}', b'{"s":"a","n":"b","v":"c","t":1,"x":1}',
                 b'{"s":1,"n":"b","v":"c","t":1}'):
         assert cookies.decode(["__Host-craftlatch=" + b64(raw)]) is None
+
+
+def test_rejects_non_ascii_and_empty():
+    for raw in ('{"s":"\\ud800","n":"b","v":"c","t":1}', '{"s":"a","n":"\\ud800","v":"c","t":1}',
+                '{"s":"a","n":"b","v":"\\u3042","t":1}', '{"s":"","n":"b","v":"c","t":1}'):
+        assert cookies.decode(["__Host-craftlatch=" + b64(raw.encode())]) is None
