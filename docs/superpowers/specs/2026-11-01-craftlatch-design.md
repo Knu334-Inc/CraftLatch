@@ -351,7 +351,7 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 - アクセスキーは Terraform では作らない（state にシークレットが残るため）。発行は CLI で行う: `aws iam create-access-key --user-name craftlatch-host`
 - このキーが漏えいしても、許可イベントの偽造（`SendMessage`）はできない。被害は「利用者名と IP の閲覧」と「許可イベントの削除による妨害」に限られる。
 
-Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`、`craftlatch-host`）には、Permissions Boundary `craftlatch-boundary` を付ける（4.8 の apply ロールの権限昇格対策）。Boundary は CloudWatch Logs（`craftlatch-*` のロググループ）と SQS（`craftlatch-grants`）の操作だけを上限として許可する。
+Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`、`craftlatch-host`）には、Permissions Boundary `craftlatch-boundary` を付ける（4.8 の apply ロールの権限昇格対策）。Boundary は CloudWatch Logs（`craftlatch-*` のロググループへの書き込み）と SQS（`craftlatch-grants` への `SendMessage`・`ReceiveMessage`・`DeleteMessage`）の操作だけを上限として許可する。権限はインラインポリシーで付与する（4.8 で `iam:Attach*` を許可しないため）。
 
 ### 4.6 AWS Budgets
 
@@ -359,10 +359,11 @@ Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`�
 
 ### 4.7 Terraform
 
-- Terraform 1.10 以上（S3 ネイティブロック `use_lockfile` のため）。AWS プロバイダーは実装時点の最新メジャーに固定する。
+- Terraform 1.10 以上（S3 ネイティブロック `use_lockfile` のため）で、バージョンを固定する。プロバイダー（`hashicorp/aws`、`hashicorp/archive`）は `~> <メジャー>.<マイナー>` で制約し、`infra/terraform/` と `infra/bootstrap/` の `.terraform.lock.hcl` をコミットする。CI は `terraform init -lockfile=readonly` を使い、プロバイダーの更新は明示的な PR で行う。
 - ルートモジュール 1 つ。モジュール分割はしない。
-- 変数: `region`、`project`（既定 `craftlatch`）、`budget_email`、`cognito_domain_prefix`。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。
-- 実行は GitHub Actions（4.8）。管理者が手元で実行するのは `infra/bootstrap/` の初回構築と、詳細な差分確認のための `terraform plan` のみ。
+- 変数: `region`、`project`（既定 `craftlatch`）、`cognito_domain_prefix`。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。Budgets の通知先メールは変数にせず、bootstrap が作成する SSM パラメーター `/craftlatch/budget-email`（`String`）を `data "aws_ssm_parameter"` で読む（PR の plan でも値が得られ、GitHub にメールアドレスを置かずに済むため）。
+- CI では常に `-input=false` を付ける。
+- 実行は GitHub Actions（4.8）。管理者が手元で実行するのは、`infra/bootstrap/` の適用（初回および変更・復旧時）と、詳細な差分確認のための `terraform plan` のみ。
 - Lambda のコードのデプロイも Terraform で行う。`archive_file` データソースで `src/lambda/craftlatch_auth/` を ZIP にし（`__pycache__`・テストは除外。外部ライブラリがないため `pip install` 等のビルド工程はない）、`aws_lambda_function` の `filename` と `source_code_hash` に渡す。コードが変わればハッシュが変わり、apply で Lambda が更新される。
 - 出力: ログイン URL、User Pool ID、キュー URL、`craftlatch-host` の ARN。
 - 実装時に確認する事項: Cognito のプラン指定（`user_pool_tier`）と HTTP API の `ip_address_type` の引数名・対応プロバイダーバージョン。
@@ -396,14 +397,44 @@ state に秘密情報は含めない（アクセスキー・Discord Webhook URL 
 
 AWS のアクセスキーは GitHub に置かない。ワークフローごとに発行される GitHub の OIDC トークンで IAM ロールを引き受ける。
 
-| IAM ロール | 用途 | 信頼ポリシーの条件（プロバイダー `token.actions.githubusercontent.com`） | 権限 |
+| IAM ロール | 用途 | 信頼ポリシーの条件（プロバイダー `token.actions.githubusercontent.com`、いずれも `StringEquals` の完全一致） | 権限 |
 |---|---|---|---|
-| `craftlatch-gha-plan` | PR での plan | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc/CraftLatch:pull_request` | 管理対象リソースの読み取り、state オブジェクトの読み取り、ロックファイル（`*.tflock`）の作成・削除 |
-| `craftlatch-gha-apply` | main での apply | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc/CraftLatch:environment:production` | `craftlatch-*` という名前のリソースに限った作成・変更・削除、state オブジェクトの読み書き |
+| `craftlatch-gha-plan` | PR での plan | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc/CraftLatch:pull_request` | 下記「plan ロールの権限」 |
+| `craftlatch-gha-apply` | main での apply | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc/CraftLatch:environment:production` | 下記「apply ロールの権限」 |
 
-- apply ロールによる権限昇格を防ぐため、IAM ロール・ユーザーの作成と権限付与（`iam:CreateRole`、`iam:CreateUser`、`iam:PutRolePolicy`、`iam:AttachRolePolicy` 等）は、Permissions Boundary `craftlatch-boundary` を付ける場合に限り許可する（条件キー `iam:PermissionsBoundary`）。Boundary 自体と GHA 用ロールの変更は apply ロールに許可しない。
-- plan ロールの読み取り権限には、SQS のメッセージ受信（`sqs:ReceiveMessage`）を含めない。
-- OIDC プロバイダー・2 つのロール・Boundary は GHA が動く前に必要なため、`infra/bootstrap/` の Terraform で管理者が手元から 1 回だけ作成する（state は同じバケットのキー `bootstrap/terraform.tfstate`）。
+apply の `sub` 自体には main ブランチの条件が含まれない。main への限定は GitHub Environment `production` の設定（許可ブランチ）で成立するため、その設定を `docs/setup.md` の検証項目にする（後述）。plan の `sub` は特定のワークフローファイルを識別しないため、plan ロールは読み取り専用に限る。
+
+**state バケットの権限（plan・apply 共通の境界）**
+
+- オブジェクト操作は `craftlatch/terraform.tfstate` と `craftlatch/terraform.tfstate.tflock` の 2 つのキーに限定する（plan: state の `GetObject`、ロックファイルの `GetObject`・`PutObject`・`DeleteObject`。apply: 両キーの `GetObject`・`PutObject`・`DeleteObject`）。
+- `s3:ListBucket` は条件 `s3:prefix` で `craftlatch/` に限定する。
+- `bootstrap/` 配下のキー、およびバケットのポリシー・公開設定・バージョニング・暗号化設定の変更は、plan・apply ロールのどちらにも許可しない。
+
+**plan ロールの権限**
+
+- 管理対象サービス（Cognito、API Gateway、Lambda、SQS、IAM、CloudWatch Logs、Budgets）の `Describe*`・`Get*`・`List*` 系の読み取り。SQS のメッセージ受信（`sqs:ReceiveMessage`）は含めない。
+- SSM パラメーター `/craftlatch/budget-email` の `ssm:GetParameter`。
+- 上記の state バケットの権限。
+
+**apply ロールの権限**（権限昇格を防ぐため、IAM 関連はステートメントを分ける）
+
+| ステートメント | 許可するアクション | 対象・条件 |
+|---|---|---|
+| ロール・ユーザーの作成 | `iam:CreateRole`、`iam:CreateUser` | 対象は `role/craftlatch-auth-role` と `user/craftlatch-host` の正確な ARN のみ。条件 `iam:PermissionsBoundary` が `craftlatch-boundary` の ARN と一致すること |
+| 権限の付与・更新・削除 | `iam:PutRolePolicy`、`iam:DeleteRolePolicy`、`iam:PutUserPolicy`、`iam:DeleteUserPolicy`、`iam:TagRole`、`iam:TagUser`、`iam:UpdateAssumeRolePolicy`、`iam:DeleteRole`、`iam:DeleteUser`、読み取り系 | 対象は上記 2 つの正確な ARN のみ。インラインポリシーのみ使い、`iam:AttachRolePolicy`・`iam:AttachUserPolicy` は許可しない |
+| ロールの受け渡し | `iam:PassRole` | 対象は `role/craftlatch-auth-role` の ARN のみ。条件 `iam:PassedToService = lambda.amazonaws.com` |
+| 明示的な拒否 | `iam:DeleteRolePermissionsBoundary`、`iam:DeleteUserPermissionsBoundary`、`iam:PutRolePermissionsBoundary`、`iam:PutUserPermissionsBoundary` | すべてのリソース（Boundary の削除・付け替えを禁止） |
+| 明示的な拒否 | IAM の全書き込みアクション（`iam:Create*`・`iam:Put*`・`iam:Update*`・`iam:Delete*`・`iam:Attach*`・`iam:Detach*`・`iam:SetDefaultPolicyVersion`・`iam:Tag*`・`iam:Untag*` 等） | `role/craftlatch-gha-*`、`policy/craftlatch-boundary`、OIDC プロバイダー（GHA 用ロール・Boundary・ポリシーバージョンの変更を禁止） |
+| アプリケーションのリソース | Cognito・API Gateway・Lambda・SQS・CloudWatch Logs・Budgets の作成・変更・削除 | 名前またはタグ `Project=CraftLatch` で `craftlatch-*` のリソースに限定（サービスごとに ARN・条件の書き方が異なるため、具体的なポリシーは実装時に U11 で検証する） |
+| その他 | SSM パラメーター `/craftlatch/budget-email` の `ssm:GetParameter`、上記の state バケットの権限 | — |
+
+**bootstrap（`infra/bootstrap/`）**
+
+- OIDC プロバイダー・2 つの GHA ロール・Boundary・SSM パラメーター `/craftlatch/budget-email` を管理する。GHA が動く前に必要で、かつ通常の apply ロールからは変更できないため、**初回および変更・復旧時に管理者が手元から実行する**。
+- 管理者は GHA ロールとは別の管理者用の認証情報（`AWS_PROFILE` 等）を使う。
+- backend は部分設定で、`terraform init -backend-config="bucket=<バケット名>" -backend-config="key=bootstrap/terraform.tfstate"` で初期化する。
+- 手順: `terraform init` → `terraform plan` で差分を確認 → `terraform apply` → GitHub Actions の plan・apply が引き続きロールを引き受けられることを確認（`workflow_dispatch` で apply ワークフローを実行し、差分がないことを確認）。手順は `docs/setup.md` と `docs/operations.md` に書く。
+- 鶏と卵の関係: ① state バケットを CLI で作成 → ② bootstrap を手元で適用 → ③ GitHub の Secret・Environment を設定 → ④ GHA で通常の Terraform を適用、の順で解消する。
 
 #### ワークフロー
 
@@ -411,9 +442,9 @@ AWS のアクセスキーは GitHub に置かない。ワークフローごと�
 |---|---|---|
 | `.github/workflows/ci.yml` | すべての PR と main への push | uv で Python 環境を用意し pytest（Lambda・`host/lib`）、`terraform fmt -check`・`terraform validate`（AWS 認証なし） |
 | `.github/workflows/terraform-plan.yml` | `infra/terraform/**` または `src/lambda/**` を変更した PR | plan ロールで `init` → `plan`。リソースの一覧と作成・変更・削除の件数を PR のジョブサマリーに表示 |
-| `.github/workflows/terraform-apply.yml` | main への push（同じパスの変更時）と `workflow_dispatch` | Environment `production` の承認後、apply ロールで同一ジョブ内に ZIP 作成・`plan`・`apply` を行う |
+| `.github/workflows/terraform-apply.yml` | main への push（同じパスの変更時）と `workflow_dispatch` | Environment `production` の承認後、apply ロールで同一ジョブ内に ZIP 作成・`plan -out=tfplan`・`apply tfplan` を行う |
 
-- apply は保存した plan ファイルを別ジョブに引き継がず、同じジョブ内で plan と apply を続けて行う。デプロイされるのはその時点の main のコード。
+- apply は同じジョブ内で `terraform plan -out=tfplan` → `terraform apply tfplan` とし、plan ファイルを別ジョブや artifact に引き継がない。デプロイ対象は**イベントのコミット（`github.sha`）**とし、checkout したコミット SHA をジョブサマリーに表示する。後続の push はそれぞれ自分の SHA で別に実行される（`concurrency` で直列化）。
 - `concurrency: group: terraform-apply, cancel-in-progress: false` で apply を直列化する。
 - main ブランチの保護ルールで `ci` の成功をマージの必須条件にする（テストが通ったコードだけがデプロイされる）。
 - 外部の Action（`actions/checkout`、`hashicorp/setup-terraform`、`aws-actions/configure-aws-credentials`、`astral-sh/setup-uv` 等）はコミット SHA で固定する。Terraform のバージョンも固定する。
@@ -425,19 +456,40 @@ AWS のアクセスキーは GitHub に置かない。ワークフローごと�
 |---|---|---|
 | `AWS_PLAN_ROLE_ARN` / `AWS_APPLY_ROLE_ARN` | Secret | ロールの ARN（アカウント ID を含むため Secret にしてログ上で伏せ字にする） |
 | `TF_STATE_BUCKET` | Secret | state バケット名 |
-| `TF_VAR_budget_email` | Secret（Environment `production`） | Budgets の通知先メール |
 | `AWS_REGION` | Variable | `ap-northeast-1` |
+
+Budgets の通知先メールは GitHub に置かない（SSM パラメーターから読む。4.7）。
 
 #### 公開リポジトリであることへの対策
 
-1. **Actions のログは誰でも閲覧できる。** plan の全文（API の URL、キューの URL、Cognito のドメイン、Lambda の環境変数等）はログに出さない。`terraform plan -out` の後、`terraform show -json` からリソースのアドレスと操作種別（作成・変更・削除）だけを抽出して表示する。アカウント ID は `::add-mask::` で伏せ字にする。詳細な差分は管理者が手元で `terraform plan` を実行して確認する。
+1. **Actions のログは誰でも閲覧できる。** Terraform の出力（API の URL、キューの URL、Cognito のドメイン、Lambda の環境変数、メールアドレス等）は公開ログに出さない。
+   - `terraform init`・`plan`・`show`・`apply` の標準出力と標準エラーは、すべてランナー上の一時ファイルにリダイレクトする（`-no-color` 付き）。
+   - 公開ログ（ジョブサマリー）に出すのは、`terraform show -json tfplan` から抽出したリソースのアドレス・操作種別（作成・変更・削除）・件数、終了コード、コミット SHA だけ。
+   - **失敗時も Terraform の出力全文は表示しない。** 失敗したコマンド名と終了コードのみを表示し、原因は管理者が手元で同じコミットに対して `terraform plan` を実行して調べる。
+   - plan ファイル、JSON、state、一時ファイルを artifact・cache に保存しない。ジョブ終了時に一時ファイルを削除する。
+   - アカウント ID は念のため `::add-mask::` で伏せ字にする（Secret の値は GitHub が自動で伏せ字にする）。
 2. **フォークからの PR では plan を実行しない。** ジョブに `if: github.event.pull_request.head.repo.full_name == github.repository` を付ける。`pull_request_target` は使わない。リポジトリ設定で、外部の協力者による PR のワークフロー実行には承認を必須にする。
 3. plan では PR のコードが plan ロールの権限で実行される。ブランチを push できるのは書き込み権限を持つ者のみであり、plan ロールは読み取り専用、state に秘密情報はないため許容する。
 4. Environment `production` には必須の承認者を設定し、デプロイ元を main ブランチに限定する（公開リポジトリでは無料プランでも利用可能）。
 
+#### GitHub 側の保護設定（`docs/setup.md` の検証項目）
+
+- Environment `production`: 許可ブランチは `main` のみ。必須の承認者はリポジトリ管理者（現状 `Knu334` の 1 名）。
+- 管理者が 1 名のため、承認は「自分で内容を確認してから実行する」確認の関門であり、第三者によるレビューではない。自己承認の禁止を有効にすると誰も承認できなくなるため有効にしない。管理者は保護ルールを変更できるため、この関門は管理者アカウントの侵害には無力である（管理者アカウントの 2 要素認証を必須とする）。
+- main ブランチの保護: PR 経由のマージを必須、`ci` の成功を必須、force push と削除を禁止。
+- Actions の設定: 外部の協力者による PR のワークフロー実行は承認を必須にする。ワークフローの既定の `GITHUB_TOKEN` 権限は読み取り専用にする。
+- Environment・ブランチ保護・ワークフローを変更できるのはリポジトリ管理者のみ（現状 `Knu334`）。
+
 #### Ubuntu 側の配置
 
-自宅サーバーは外部からの接続を受け付けないため、GitHub Actions からは配置しない。管理者がサーバー上でリポジトリを `git pull` し、`sudo host/install.sh` を実行する。`install.sh` はファイルの配置（5.2 の所有者・権限で）、`systemd-tmpfiles --create`、`systemctl daemon-reload` を行い、稼働中のユニットの再起動が必要な場合はその旨を表示する（自動では再起動しない）。
+自宅サーバーは外部からの接続を受け付けないため、GitHub Actions からは配置しない。管理者がサーバー上でリポジトリを `git pull` し、`sudo host/install.sh` を実行する。初期構築（`docs/setup.md`）と `install.sh` の責務は次のように分ける。
+
+| 担当 | 内容 |
+|---|---|
+| 初期構築（手順書。管理者が実行） | `minecraft` ユーザーへの移行（7.6）、依存パッケージの導入（`sudo apt install python3-boto3 nftables`）、アクセスキーと Webhook URL の配置（5.2 の所有者・権限で） |
+| `install.sh` の事前検証 | root で実行されていること、`minecraft` ユーザーの存在、`python3`・`python3-boto3`・`nft` の存在、systemd 248 以上、`/media/ssd/paper` の存在を確認し、満たさなければ何も変更せずに終了する |
+| `install.sh` の処理 | `craftlatch` ユーザーがなければ作成する（5.1）。スクリプト・ユニット・nft ルール・tmpfiles.d を 5.2 の所有者・権限で配置する。`config.json` は存在しない場合のみ雛形から作成する（既存の設定・秘密ファイル（`aws-credentials`・`discord-webhook`）は上書きしない）。`systemd-tmpfiles --create` と `systemctl daemon-reload` を実行する |
+| `install.sh` の更新時の案内 | 稼働中のユニットは自動では再起動しない。変更されたファイルの種類に応じて、実行すべきコマンドを**順序付きで**表示する。Python スクリプトのみの変更: 次回の実行から反映されるため操作不要。ユニットファイルの変更: 表示された各ユニットの `systemctl restart`（timer・path は該当ユニット）。nft ルールの変更: `sudo systemctl restart craftlatch-firewall.service`（Minecraft の停止と許可リストの消去を伴う旨を併記） |
 
 ---
 
