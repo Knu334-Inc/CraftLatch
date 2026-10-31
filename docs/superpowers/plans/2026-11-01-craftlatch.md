@@ -69,29 +69,33 @@
 - Create: `docs/superpowers/plans/2026-11-01-craftlatch-spike.md`（結果の記録）
 - Create: `tests/host/fixtures/nft_list_table.json`
 
-- [ ] **Step 1: U1 — `ipv6.disable=1` で `table inet` を読み込めるか（別のネットワーク名前空間で実施し本番のルールに影響させない）**
+**どの確認も期待どおりでなければ、その時点で作業を止め、結果を管理者に報告して計画（関連するすべてのタスク）を改訂してから再開する。** 分岐のまま実装を続けない。
 
-管理者に依頼: `sudo unshare --net sh -c 'printf "table inet t { set s { type ipv4_addr; flags dynamic, timeout; timeout 10m; size 256; } chain c { type filter hook input priority filter - 10; policy accept; iif \"lo\" accept; iifname \"enp3s0\" ether saddr != 00:11:22:33:44:55 ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept; tcp dport 25565 ip saddr @s update @s { ip saddr timeout 10m } counter accept; tcp dport 25565 counter drop; } }\n" | nft -f - && nft -j list table inet t'`
+- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `/tmp/craftlatch-probe.nft` としてサーバーに置く（`scp -P 3340 -i /workspace/.ssh/id_ed25519 <ローカルのファイル> agent@192.168.33.4:/tmp/craftlatch-probe.nft`）。続けて同じ内容の先頭に無条件の `accept` を 1 行足した `/tmp/craftlatch-probe-bad.nft` も置く（Task 15 の fwcheck 試験用）。
 
-Expected: エラーなく JSON が出力される。失敗した場合は `table ip` で同じことを行い、結果を記録する（`table ip` になる場合、Task 6 の `nftgen` のファミリーを `ip` にする）。
+- [ ] **Step 2: U1 — `ipv6.disable=1` で `table inet` を読み込めるか（別のネットワーク名前空間で実施し、本番のルールに影響させない）**
 
-- [ ] **Step 2: Step 1 の JSON を `tests/host/fixtures/nft_list_table.json` として保存する**（テーブル名 `t` を `craftlatch`、set 名 `s` を `allow4`、チェイン名 `c` を `input` に置き換えたルールで取り直してもよい。fwcheck の正規化テストに使う）
+管理者に依頼: `sudo unshare --net sh -c 'nft -f /tmp/craftlatch-probe.nft && nft -j list table inet craftlatch' > /tmp/nft_list_table.json; echo rc=$?`
 
-- [ ] **Step 3: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（本番とは別ディレクトリ・別ポートの一時サーバーで確認。jar は agent ユーザーでも読めるため sudo 不要）**
+Expected: `rc=0` で、`/tmp/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
 
-Run（サーバー上、agent ユーザー）: `mkdir -p /tmp/probe && cd /tmp/probe && echo eula=true > eula.txt && mkfifo probe.fifo && (java -Xmx512M -jar /media/ssd/paper/paper-1.21.7-17.jar --nogui --port 25599 <> probe.fifo > probe.log 2>&1 &) && sleep 120 && echo stop > probe.fifo && sleep 30 && grep -E "Stopping server|Saving worlds" probe.log`
+- [ ] **Step 3: Step 2 の JSON を `tests/host/fixtures/nft_list_table.json` として取得する**（`scp -P 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4:/tmp/nft_list_table.json tests/host/fixtures/`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
 
-`<>` で FIFO を読み書き両用で開くため、書き手がいなくてもブロックせず EOF にもならない（systemd のソケットと同じ状態）。カレントディレクトリが `/tmp/probe` なのでプラグインは読み込まれない。終了後に `rm -rf /tmp/probe` で片付ける。
+- [ ] **Step 4: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（プラグインなしの一時サーバーで確認。jar は agent ユーザーでも読めるため sudo 不要）**
 
-Expected: `Stopping server` と `Saving worlds` が出力される。出ない場合は設計書 7.3 の停止方式を見直す必要があるため、作業を止めて管理者に報告する。
+Run（サーバー上、agent ユーザー、1 行）: `D=$(mktemp -d /tmp/craftlatch-probe.XXXXXX) && cd "$D" && printf 'eula=true\n' > eula.txt && printf 'server-ip=127.0.0.1\nserver-port=25599\nonline-mode=true\n' > server.properties && mkfifo console && (java -Xmx512M -jar /media/ssd/paper/paper-1.21.7-17.jar --nogui <> console > probe.log 2>&1 & echo $! > pid) && timeout 300 sh -c 'until grep -q "Done (" probe.log; do sleep 5; done' && timeout 5 sh -c 'printf "stop\n" > console' && timeout 120 sh -c 'while kill -0 "$(cat pid)" 2>/dev/null; do sleep 2; done'; grep -E "Stopping server|Saving worlds" probe.log; kill "$(cat pid)" 2>/dev/null; cd / && rm -rf "$D"`
 
-- [ ] **Step 4: U3 — 停止ジョブ実行中に `systemctl start --no-block` した場合の挙動（ダミーユニットで確認）**
+`server-ip=127.0.0.1` で localhost のみに待ち受け、外部に公開しない。`<>` で FIFO を読み書き両用で開くため、書き手がいなくてもブロックせず EOF にもならない（systemd のソケットと同じ状態）。起動待ち 300 秒・終了待ち 120 秒の上限を設け、最後に必ずプロセスを止めて作業ディレクトリを削除する。プラグイン込みの実構成での FIFO 停止は Task 15 Step 4 で別に確認する。
 
-管理者に依頼: `sudo systemd-run --unit=stopprobe --property=ExecStop="/bin/sleep 10" -- /bin/sleep infinity` → `sudo systemctl stop --no-block stopprobe` → 直後に `sudo systemctl start --no-block stopprobe` → `sleep 15; systemctl status stopprobe`（transient unit は停止後に消えるため、消える場合は `/etc/systemd/system/stopprobe.service` を一時作成して同じ手順を行い、最後に削除する）
+Expected: `Stopping server` と `Saving worlds` が出力される。
 
-Expected: 停止完了後に再び `active (running)` になる。ならない場合は Task 4 の apply で「stop ジョブ実行中なら完了を待って start する」処理を追加する必要があるため記録する。
+- [ ] **Step 5: U3 — 停止ジョブ実行中に `systemctl start --no-block` した場合の挙動（ダミーユニットで確認）**
 
-- [ ] **Step 5: 結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に記録し、コミットする**
+管理者に依頼（各 1 行）: `printf '[Service]\nExecStart=/bin/sleep infinity\nExecStop=/bin/sleep 10\n' | sudo tee /etc/systemd/system/craftlatch-stopprobe.service` → `sudo systemctl daemon-reload && sudo systemctl start craftlatch-stopprobe` → `sudo systemctl stop --no-block craftlatch-stopprobe && sleep 1 && sudo systemctl start --no-block craftlatch-stopprobe && sleep 15 && systemctl is-active craftlatch-stopprobe` → 片付け `sudo systemctl stop craftlatch-stopprobe; sudo rm /etc/systemd/system/craftlatch-stopprobe.service; sudo systemctl daemon-reload`
+
+Expected: `active`（停止完了後に再起動された）。`inactive` の場合は作業を止める（apply の待機方式・ユニットのタイムアウト・待機後の要求期限の再検証を一体で設計し直す必要があるため）。
+
+- [ ] **Step 6: 結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に記録し、コミットする**
 
 ```bash
 git add docs/superpowers/plans/2026-11-01-craftlatch-spike.md tests/host/fixtures/nft_list_table.json
@@ -154,8 +158,8 @@ git commit -m "chore: uv と pytest のプロジェクト土台を追加"
 
 ```python
 def test_valid_sqs_message():
-    g = validate_sqs_message({"v":1,"type":"allow","ip":"203.0.113.5","iat":now,"exp":now+600,"id":U,"user":"alice"}, now)
-    assert g == AllowGrant("203.0.113.5", now, now+600, U, "alice")
+    g = validate_sqs_message({"v":1,"type":"allow","ip":"8.8.8.8","iat":now,"exp":now+600,"id":U,"user":"alice"}, now)
+    assert g == AllowGrant("8.8.8.8", now, now+600, U, "alice")
 
 @pytest.mark.parametrize("patch", [
     {"v": True}, {"v": 2}, {"iat": True}, {"exp": now + 601}, {"exp": now},          # bool・TTL超過・期限切れ
@@ -184,6 +188,8 @@ def test_load_config_rejects_missing_and_invalid(tmp_path):   # Review Focus 2
     with pytest.raises(ValidationError): load_config(tmp_path / "none.json")
     (tmp_path / "c.json").write_text('{"region": "ap-northeast-1"}')
     with pytest.raises(ValidationError): load_config(tmp_path / "c.json")
+    # 雛形（host/config.json.example）そのまま = queue_url・MAC がプレースホルダー "<...>" → ValidationError
+    with pytest.raises(ValidationError): load_config(Path("host/config.json.example"))
 ```
 
 - [ ] **Step 2: `uv run pytest tests/host/test_common.py -v` を実行し、import エラーで失敗することを確認する**
@@ -209,9 +215,9 @@ git commit -m "feat(host): 設定読み込みと要求の検証を追加"
 - Consumes: Task 2 の `load_config`、`validate_sqs_message`、`allow_to_request`、`write_request`、`parse_json_strict`
 - Produces:
   - `make_sqs_client(region: str)`（`botocore.config.Config(connect_timeout=3, read_timeout=5, retries={"total_max_attempts": 1})`）
-  - `@dataclass class PollResult: received: int; written: int; deleted: int; invalid: int; aws_error: str | None`
+  - `@dataclass class PollResult: received: int; written: int; deleted: int; invalid: int; failure: str | None`（`failure` は AWS 例外の種類名、または全体期限超過の `"deadline"`。どちらも失敗カウンタを加算する）
   - `run_poll(sqs, queue_url: str, requests_dir: Path, now_fn: Callable[[], int], monotonic_fn: Callable[[], float], deadline_s: float = 35.0) -> PollResult`
-  - `update_failures(state_dir: Path, aws_error: str | None) -> int`（成功で 0 に戻し、失敗で加算した回数を返す。ファイル `poll-failures`）
+  - `update_failures(state_dir: Path, failure: str | None) -> int`（成功で 0 に戻し、失敗で加算した回数を返す。ファイル `poll-failures`）
   - `key_age_warning(rotated_file: Path, today: date, warn_days: int) -> str | None`
   - `main(argv: list[str] | None = None) -> int`（失敗回数 ≥5 で 1、それ以外 0。設定不正は 1）
 
@@ -223,7 +229,9 @@ def test_valid_message_written_then_deleted(tmp_path): ...
 def test_invalid_message_deleted_without_file(tmp_path): ...       # invalid == 1、ファイル 0 件、delete 1 回
 def test_write_failure_keeps_message(tmp_path): ...                # 書き込み不可ディレクトリ → delete 0 回
 def test_receive_loops_max_5_times(tmp_path): ...                  # 毎回 10 件返す偽 SQS → receive 呼び出しは 5 回
-def test_deadline_stops_new_calls(tmp_path): ...                   # monotonic_fn が 36.0 を返す → 新規 API を呼ばない
+def test_deadline_stops_new_calls_and_counts_as_failure(tmp_path):
+    # monotonic_fn は呼び出し順に 0.0（起動時）→ 10.0 → 36.0 を返す。偽 SQS は毎回 10 件返す
+    # → 36.0 を見た後は receive/delete を呼ばず、result.failure == "deadline"、main 経由で poll-failures が 1 加算される
 def test_receive_args(tmp_path): ...                               # MaxNumberOfMessages=10, WaitTimeSeconds=1
 def test_failures_counter_and_exit_code(tmp_path):
     for i in range(1, 6): assert update_failures(tmp_path, "EndpointConnectionError") == i
@@ -235,7 +243,7 @@ def test_key_age_warning():
 
 - [ ] **Step 2: `uv run pytest tests/host/test_poll.py -v` を実行し、失敗することを確認する**
 
-- [ ] **Step 3: `host/lib/poll.py` を実装する** — 本文は 1024 バイト超なら無効扱い。AWS 例外（`botocore.exceptions.BotoCoreError`・`ClientError`）は `aws_error` に種類名を入れて打ち切る。ログは `print("event=poll received=.. written=.. deleted=.. invalid=.. result=ok|error", flush=True)` の key=value 1 行。`main` はキー期限警告 → `run_poll` → `update_failures` → 終了コードの順。
+- [ ] **Step 3: `host/lib/poll.py` を実装する** — 本文は 1024 バイト超なら無効扱い。AWS 例外（`botocore.exceptions.BotoCoreError`・`ClientError`）は `failure` に種類名を、期限超過は `"deadline"` を入れて打ち切る。`main` は `--import-check` を受け取ったら `import-ok` を出力して 0 を返す（Task 8 の起動確認用。poll 以外の各スクリプトの `main` も同じ）。ログは `print("event=poll received=.. written=.. deleted=.. invalid=.. result=ok|error", flush=True)` の key=value 1 行。`main` はキー期限警告 → `run_poll` → `update_failures` → 終了コードの順。
 
 - [ ] **Step 4: `uv run pytest tests/host/test_poll.py -v` を実行し、PASS を確認する**
 
@@ -276,10 +284,10 @@ def test_collect_removes_stale_tmp_files(tmp_path):            # Review Focus 3
     collect(...); assert not old.exists() and fresh_tmp.exists()
 def test_bad_file_does_not_stop_others(tmp_path): ...          # 不正 1 件 + 正常 1 件 → 正常分は返る
 def test_build_nft_batch():
-    assert build_nft_batch(["203.0.113.5"]) == (
-        "add element inet craftlatch allow4 { 203.0.113.5 }\n"
-        "delete element inet craftlatch allow4 { 203.0.113.5 }\n"
-        "add element inet craftlatch allow4 { 203.0.113.5 timeout 10m }\n")
+    assert build_nft_batch(["8.8.8.8"]) == (
+        "add element inet craftlatch allow4 { 8.8.8.8 }\n"
+        "delete element inet craftlatch allow4 { 8.8.8.8 }\n"
+        "add element inet craftlatch allow4 { 8.8.8.8 timeout 10m }\n")
 def test_allow_order_and_seen_recorded_last(tmp_path):
     # 呼び出し順: nft -f -（stdin=バッチ）→ last-allow 更新 → systemctl start --no-block minecraft.service → seen 記録
 def test_duplicate_id_skipped(tmp_path): ...                   # seen にある id は nft も start も呼ばない
@@ -288,11 +296,19 @@ def test_allow_wins_over_stop_in_same_batch(tmp_path): ...     # stop は呼ば�
 def test_stale_stop_discarded(tmp_path, case): ...             # systemctl stop を呼ばない
 def test_valid_stop_calls_stop_no_block(tmp_path): ...
 def test_partial_success_keeps_allow_returns_false(tmp_path): ...  # nft 成功・start 失敗 → False、nft の取り消しはしない
+@pytest.mark.parametrize("crash_at", ["before_nft", "after_nft", "after_start"])
+def test_crash_recovery_is_at_least_once(tmp_path, crash_at):
+    # runner／StateStore に例外を注入して apply を中断 → 要求ファイルは残る → 2 回目の apply で
+    # before_nft: nft 1 回・start 1 回 / after_nft: nft 再適用・start 1 回 / after_start: nft・start がもう 1 回ずつ（設計書 5.5 の表）
+    # いずれも 2 回目の終了後に seen に id があり、要求ファイルが消えている
+def test_poll_to_apply_integration(tmp_path):
+    # Task 3 の run_poll（偽 SQS、有効メッセージ 1 件）で要求ファイルを作り、そのディレクトリに対して collect → apply_batch
+    # → nft バッチに IP が入り、systemctl start が呼ばれる
 ```
 
 - [ ] **Step 2: `uv run pytest tests/host/test_apply.py -v` を実行し、失敗することを確認する**
 
-- [ ] **Step 3: `host/lib/apply.py` を実装する** — `systemctl` は `["systemctl", "start", "--no-block", "minecraft.service"]`、`["systemctl", "show", "-p", "InvocationID", "--value", "minecraft.service"]`、`["systemctl", "show", "-p", "ActiveState", "--value", "minecraft.service"]`。nft は `["nft", "-f", "-"]` に stdin でバッチを渡す。`main` は `pwd.getpwnam("craftlatch").pw_uid` を使い、隔離・削除の失敗か `apply_batch` の失敗で終了コード 1。Task 0 の U3 が「待機が必要」だった場合は、`start_no_block` の前に `ActiveState == "deactivating"` なら最大 200 秒待つ処理とそのテストを追加する。ログは設計書 5.5 の形式。
+- [ ] **Step 3: `host/lib/apply.py` を実装する** — `systemctl` は `["systemctl", "start", "--no-block", "minecraft.service"]`、`["systemctl", "show", "-p", "InvocationID", "--value", "minecraft.service"]`、`["systemctl", "show", "-p", "ActiveState", "--value", "minecraft.service"]`。nft は `["nft", "-f", "-"]` に stdin でバッチを渡す。`main` は `pwd.getpwnam("craftlatch").pw_uid` を使い、隔離・削除の失敗か `apply_batch` の失敗で終了コード 1。停止ジョブ中の起動は systemd が停止完了後に処理する前提（Task 0 Step 5 で確認済みであること）。ログは設計書 5.5 の形式。
 
 - [ ] **Step 4: `uv run pytest tests/host/test_apply.py -v` を実行し、PASS を確認する**
 
@@ -363,12 +379,13 @@ git commit -m "feat(host): SLP による無人検知と stop 要求を追加"
 **Interfaces:**
 - Consumes: Task 2 の `Config`、`TrustedSource`、`load_config`、`atomic_write_text`；Task 0 のフィクスチャ
 - Produces:
-  - `render_ruleset(cfg: Config) -> str`（設計書 6.1 の全文。Task 0 で `table ip` になった場合はファミリーを切り替える）
-  - `nftgen.main(argv: list[str] | None = None) -> int`（`load_config()` してルールを標準出力へ。`install.sh` が `/etc/craftlatch/craftlatch.nft` にリダイレクトする）
+  - `render_ruleset(cfg: Config) -> str`（設計書 6.1 の全文、`table inet craftlatch`）
+  - `nftgen.main(argv: list[str] | None = None) -> int`（`nftgen.py --output <path>`。`load_config()` で完成した設定を検証し、ルールを `<path>.tmp` に書いてから `rename` で置き換える。検証失敗時は既存ファイルに触れず 1 を返す）
   - `normalize(nft_json: dict) -> list`（`handle`・カウンタ値・set の要素・`expires` を除去し、メタ情報 `metainfo` を除く）
-  - `expected_json(cfg: Config, runner) -> dict`（`render_ruleset` の結果を `unshare --net nft -f -` で別の名前空間に読み込み、同じ名前空間で `nft -j list table inet craftlatch` した出力。1 回の `unshare --net sh -c` ではなく、`["unshare", "--net", "--", "nft", "-j", "-f", "-"]` に「ルール + `list table inet craftlatch`」を流す。Task 0 で動作を確認した方式に合わせる）
+  - `expected_json(cfg: Config, runner) -> dict`（`render_ruleset` の結果を一時ファイルに書き、Task 0 Step 2 と同じ方式 `["unshare", "--net", "--", "sh", "-c", 'nft -f "$1" && nft -j list table inet craftlatch', "sh", <一時ファイル>]` で別の名前空間に読み込んだ出力）
+  - `REQUIRED_RULE_SHAPES`（生成器と独立した最低限の検査。正規化後の live に、`lo` の accept、TCP/25565 と UDP/19132 の drop が末尾 2 本にあること、`allow4` が `dynamic`・`timeout` フラグを持つことを確認する。生成器と期待値が同じ誤りを共有しても検出できるようにする）
   - `fwcheck.main(argv: list[str] | None = None) -> int`（live と expected の `normalize` が一致すれば 0、不一致・設定不正・コマンド失敗は 1）
-  - `default_gateway(ip_route_output: str) -> str`、`neigh_mac(ip_neigh_output: str) -> str | None`（`REACHABLE`/`STALE`/`DELAY`/`PERMANENT` のみ。`INCOMPLETE`/`FAILED` は None）、`set_router_mac(config_path: Path, mac: str, overwrite: bool) -> bool`、`routermac.main(argv) -> int`（`--yes`、`--refresh`）
+  - `default_gateway(ip_route_output: str) -> str`、`neigh_mac(ip_neigh_output: str) -> str | None`（`REACHABLE`/`STALE`/`DELAY`/`PERMANENT` のみ。`INCOMPLETE`/`FAILED` は None）、`set_router_mac(config_path: Path, mac: str, overwrite: bool) -> bool`（`load_config` を使わず JSON を直接読み書きする。補完前は他の項目が未入力でもよいため。`atomic_write_text` で 0644 書き込み）、`routermac.main(argv) -> int`（`--yes`、`--refresh`）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -381,7 +398,9 @@ def test_render_contains_rules_in_order(cfg):
     assert lines[-4:-2] == ["tcp dport 25565 counter drop", "udp dport 19132 counter drop"]
 def test_render_rejects_bad_iface_or_mac(cfg): ...      # iface に空白・引用符、MAC 形式違い → ValidationError
 def test_normalize_strips_volatile(fixture_json): ...   # handle・packets・bytes・elem が消える
-def test_compare_detects_extra_accept_and_reorder(fixture_json): ...  # 先頭に accept を挿入 / 2 ルール入れ替え → 不一致
+def test_fixture_matches_itself(fixture_json): ...      # normalize(fixture) 同士は一致、REQUIRED_RULE_SHAPES も満たす
+@pytest.mark.parametrize("mutation", ["prepend_accept", "swap_rules", "drop_rule", "remove_timeout_flag", "change_set_size"])
+def test_compare_detects_mutations(fixture_json, mutation): ...       # フィクスチャを書き換えた live → 不一致で 1
 def test_main_fails_closed_on_bad_config(tmp_path): ...  # Review Focus 2 → 1
 def test_main_fails_on_runner_error(): ...               # nft 失敗 → 1
 def test_neigh_parsing():
@@ -415,7 +434,7 @@ git commit -m "feat(host): nft ルール生成・構造検証・ルーター MAC
   - `build_payload(hostname: str, unit: str, now: int) -> dict`（`{"content": "[CraftLatch] <hostname>: <unit> が失敗しました (<ISO8601 JST>)。確認: journalctl -u <unit> -n 50"}`）
   - `post_webhook(url: str, payload: dict, timeout: float = 10.0) -> None`（失敗は例外）
   - `notify.main(argv: list[str]) -> int`（ユニット名 `^[A-Za-z0-9@._-]{1,128}$`、Webhook URL は `$CREDENTIALS_DIRECTORY/webhook`、状態は `$STATE_DIRECTORY`）
-  - `mc-stop <PID>`（環境変数 `MC_CONSOLE` で FIFO のパスを上書き可能、既定 `/run/minecraft.console`。待機上限は `MC_STOP_WAIT`、既定 170）
+  - `mc-stop <PID>`（環境変数 `MC_CONSOLE` で FIFO のパスを上書き可能、既定 `/run/minecraft.console`。待機上限は `MC_STOP_WAIT`、既定 170。FIFO が無い・5 秒以内に書けない場合は待機せず 1 で終了し、systemd の SIGTERM に任せる）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -432,11 +451,13 @@ def test_invalid_unit_name_returns_1(): ...
 def test_mc_stop_writes_stop_and_waits(tmp_path):
     # mkfifo → 「1 行読んで 'stop' なら終了する」子プロセスを起動 → mc-stop <子PID>（MC_CONSOLE=fifo）が 0 で終わり、子プロセスが終了している
 def test_mc_stop_empty_pid_is_noop(): ...                    # 引数なし → 0
+def test_mc_stop_missing_fifo_fails_fast(tmp_path): ...      # MC_CONSOLE=存在しないパス → 6 秒以内に 0 以外で終了
+def test_mc_stop_uses_default_path_when_unset(tmp_path): ... # MC_CONSOLE 未設定・/run/minecraft.console が無い環境 → 0 以外、stderr に /run/minecraft.console を含む
 ```
 
 - [ ] **Step 2: `uv run pytest tests/host/test_notify.py tests/host/test_mc_stop.py -v` を実行し、失敗することを確認する**
 
-- [ ] **Step 3: `notify.py` と `mc-stop`（`#!/bin/sh`、`set -eu`、`timeout 5 sh -c 'printf "stop\n" > "$MC_CONSOLE"'`、`kill -0` を 1 秒ごとに確認）を実装する**
+- [ ] **Step 3: `notify.py` と `mc-stop` を実装する** — `mc-stop` は `#!/bin/sh`、`set -u`、`console="${MC_CONSOLE:-/run/minecraft.console}"`、FIFO でなければエラー出力して 1、`timeout 5 sh -c 'printf "stop\n" > "$1"' sh "$console"`（パスは位置引数で子シェルに渡す）が失敗したら 1、成功したら `kill -0 "$pid"` を 1 秒ごとに最大 `MC_STOP_WAIT` 回確認して 0。
 
 - [ ] **Step 4: 同じテストを実行し、PASS を確認する**
 
@@ -458,7 +479,7 @@ git commit -m "feat(host): Discord 通知と FIFO 経由の停止スクリプト
 - Consumes: Task 2〜7 の各スクリプト（配置先 `/usr/local/lib/craftlatch/`）、`routermac.main`、`nftgen.render_ruleset`
 - Produces: `sudo host/install.sh [--yes] [--refresh-router-mac]`、`sudo host/scripts/craftlatch-rotate-key [--finish <OLD_KEY_ID>]`
 
-- [ ] **Step 1: 失敗するテストを書く**（ユニットファイルを `configparser`（`strict=False`、重複キー許可）で読み、設計書の値を検査する）
+- [ ] **Step 1: 失敗するテストを書く**（ユニットファイルを `configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))` で読み、`optionxform = str` で大文字小文字を保持して設計書の値を検査する。ユニットの構文自体は Task 15 で `systemd-analyze verify` により確認する）
 
 ```python
 def test_python_units_use_E_s_not_I(): ...       # ExecStart が "/usr/bin/python3 -E -s /usr/local/lib/craftlatch/" で始まる
@@ -473,8 +494,14 @@ def test_tmpfiles_entries():
     assert "d /run/craftlatch/requests 1770 root craftlatch -" in text
 @pytest.mark.parametrize("script", ["poll.py", "apply.py", "idle.py", "notify.py", "nftgen.py", "routermac.py", "fwcheck"])
 def test_scripts_import_common_under_E_s(script, tmp_path):
-    # 実際の ExecStart と同じ `python -E -s <host/lib/スクリプト>` で起動し（引数は不正・設定は存在しないパス）、
-    # 終了コードが 0 以外でも stderr に "ModuleNotFoundError" / "ImportError" が含まれないこと
+    # host/lib を tmp_path/lib に丸ごとコピー（配置後と同じ構成）し、cwd を別ディレクトリにして
+    # `sys.executable -E -s tmp_path/lib/<script> --import-check` を実行 → 終了コード 0 かつ stdout が "import-ok"
+def test_rotate_key_stages(tmp_path):
+    # PATH の先頭に偽の aws・systemctl（呼び出しを記録し、失敗させる段階を環境変数で指定）を置き、
+    # CRAFTLATCH_ETC=tmp_path/etc・CRAFTLATCH_STATE=tmp_path/state で実行:
+    # (a) 新キーの検証失敗 → 現行 aws-credentials は不変・新キーを delete・timer 再開・終了コード 1
+    # (b) 切り替え後の受信失敗 → .old を戻す・新キーを delete・終了コード 1
+    # (c) 確定後の旧キー削除失敗 → 新キーは削除しない・終了コード 1・`--finish <OLD>` で残りだけ実行して 0
 ```
 
 - [ ] **Step 2: `uv run pytest tests/host/test_units.py -v` を実行し、失敗することを確認する**
@@ -483,9 +510,9 @@ def test_scripts_import_common_under_E_s(script, tmp_path):
 
 - [ ] **Step 4: `uv run pytest tests/host/test_units.py -v` を実行し、PASS を確認する**
 
-- [ ] **Step 5: `host/install.sh` を作成する** — `#!/usr/bin/env bash`、`set -euo pipefail`。設計書 4.7「Ubuntu 側の配置」の表どおり: 事前検証（root、`minecraft` ユーザー、`python3 -c 'import boto3'`、`nft`、`systemctl --version` ≥248、`/media/ssd/paper`）→ `craftlatch` ユーザー作成（なければ）→ `install -o root -g root -m 0755/0644` で配置 → `config.json` がなければ雛形をコピー（0644）→ `python3 -E -s /usr/local/lib/craftlatch/routermac.py [--yes] [--refresh]` → `python3 -E -s /usr/local/lib/craftlatch/nftgen.py > /etc/craftlatch/craftlatch.nft` → `systemd-tmpfiles --create /etc/tmpfiles.d/craftlatch.conf` → `systemctl daemon-reload` → 変更内容に応じた順序付きの案内を表示。`aws-credentials`・`discord-webhook`・既存の `config.json` は上書きしない。
+- [ ] **Step 5: `host/install.sh` を作成する** — `#!/usr/bin/env bash`、`set -euo pipefail`。設計書 4.7「Ubuntu 側の配置」の表どおり: 事前検証（root、`minecraft` ユーザー、`python3 -c 'import boto3'`、`nft`、`systemctl --version` ≥248、`/media/ssd/paper`）→ `craftlatch` ユーザー作成（なければ）→ `install -o root -g root -m 0755/0644` で配置 → `config.json` がなければ雛形をコピー（0644）→ `python3 -E -s /usr/local/lib/craftlatch/routermac.py [--yes] [--refresh]` → `python3 -E -s /usr/local/lib/craftlatch/nftgen.py --output /etc/craftlatch/craftlatch.nft`（設定が未完成で失敗した場合は「`/etc/craftlatch/config.json` の `queue_url` を入力して再実行」と表示して終了コード 1。キュー URL は Terraform の出力 `queue_url` を管理者が手元で確認して入力する）→ `systemd-tmpfiles --create /etc/tmpfiles.d/craftlatch.conf` → `systemctl daemon-reload` → 変更内容に応じた順序付きの案内を表示。`aws-credentials`・`discord-webhook`・既存の `config.json` は上書きしない。テスト用に配置先の接頭辞を環境変数 `CRAFTLATCH_ROOT`（既定は空）で変えられるようにする。
 
-- [ ] **Step 6: `host/scripts/craftlatch-rotate-key` を作成する** — 設計書 9.1 の手順 1〜7（確定境界・段階別の復旧・`--finish`）。新キーの検証は `env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new AWS_CONFIG_FILE=/dev/null AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 aws sts get-caller-identity`。
+- [ ] **Step 6: `host/scripts/craftlatch-rotate-key` を作成する** — 設計書 9.1 の手順 1〜7（確定境界・段階別の復旧・`--finish`）。設定ディレクトリと状態ディレクトリは `CRAFTLATCH_ETC`（既定 `/etc/craftlatch`）・`CRAFTLATCH_STATE`（既定 `/var/lib/craftlatch`）で変えられるようにし、Step 1 の `test_rotate_key_stages` を通す。新キーの検証は `env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new AWS_CONFIG_FILE=/dev/null AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 aws sts get-caller-identity`。
 
 - [ ] **Step 7: シェルスクリプトの構文を確認する**
 
@@ -522,8 +549,8 @@ git commit -m "feat(host): systemd ユニット・install.sh・キーローテ�
 ```python
 def test_login_redirect_and_cookie(): ...        # 302、location に prompt=login・code_challenge_method=S256・scope=openid、cookies に __Host-craftlatch
 def test_callback_success_sends_message():
-    # SendMessage の本文 == {"v":1,"type":"allow","ip":"203.0.113.5","iat":now,"exp":now+600,"id":<uuid>,"user":"alice"}
-    # レスポンス 200・content-type text/html; charset=utf-8・本文に 203.0.113.5・Cookie 削除
+    # SendMessage の本文 == {"v":1,"type":"allow","ip":"8.8.8.8","iat":now,"exp":now+600,"id":<uuid>,"user":"alice"}
+    # レスポンス 200・content-type text/html; charset=utf-8・本文に 8.8.8.8・Cookie 削除
 def test_callback_state_mismatch_returns_relogin_page(): ...   # Review Focus 1：200 か 400 の HTML、SQS 未送信
 @pytest.mark.parametrize("claim_patch,kind", [
     ({"auth_time": now-121}, "relogin"), ({"auth_time": now+61}, "relogin"), ({"nonce": "x"}, "relogin"),
@@ -536,6 +563,10 @@ def test_non_ipv4_or_private_source(): ...       # sourceIp "2001:db8::1" / "10.
 def test_token_exchange_error_temporary(): ...   # urlopen が例外 → temporary
 def test_ignores_x_forwarded_for(): ...          # ヘッダーに別 IP があっても requestContext.http.sourceIp を使う
 def test_unknown_route_404(): ...
+def test_zip_layout_importable(tmp_path):
+    # Task 11 の archive_file と同じ規則（source_dir = src/lambda、__pycache__ と *.pyc を除外）で zipfile を作り、
+    # 展開先を sys.path にして importlib.import_module("craftlatch_auth.handler").lambda_handler が存在すること、
+    # ZIP 内のパスが "craftlatch_auth/handler.py" であること（ZIP 直下に handler.py が無いこと）
 def test_security_headers_present(): ...         # CSP default-src 'none'; style-src 'unsafe-inline'、no-store、no-referrer、nosniff
 ```
 
@@ -572,7 +603,7 @@ Terraform はコンテナ内に無く、レジストリへの通信もコンテ�
 
 - [ ] **Step 3: plan ロール・apply ロールの権限と Boundary を書く** — 設計書 4.7 の表のステートメントをそのまま（作成は対象 ARN + `iam:PermissionsBoundary`、付与系は 2 ARN 限定、`iam:Attach*` なし、`PassRole` は `iam:PassedToService = lambda.amazonaws.com`、Boundary・GHA ロール・OIDC プロバイダーへの書き込みを明示 Deny）。Boundary は設計書 4.5 末尾の範囲。
 
-- [ ] **Step 4: コミットする**（`.terraform.lock.hcl` は管理者が Task 14 の初回 `terraform init` で生成してコミットする。手順は Task 13 の `docs/setup.md` に書く）
+- [ ] **Step 4: コミットする**（`.terraform.lock.hcl` は Task 12 Step 5 で生成してコミットする）
 
 ```bash
 git add infra/bootstrap .gitignore
@@ -585,7 +616,7 @@ git commit -m "feat(infra): GitHub OIDC と GHA 用ロール・Boundary の boot
 - Create: `infra/terraform/versions.tf`、`backend.tf`（部分設定、`key = "craftlatch/terraform.tfstate"`、`use_lockfile = true`）、`variables.tf`（`region`、`project`、`cognito_domain_prefix`）、`cognito.tf`、`api.tf`、`lambda.tf`、`sqs.tf`、`iam.tf`、`outputs.tf`
 
 **Interfaces:**
-- Consumes: Task 9 の `src/lambda/craftlatch_auth/`（`archive_file`、`__pycache__` 除外、ハンドラー `craftlatch_auth.handler.lambda_handler`）、Task 10 の Boundary 名
+- Consumes: Task 9 の `src/lambda/craftlatch_auth/`（`archive_file` は `source_dir = "${path.module}/../../src/lambda"`・`excludes` に `__pycache__` と `*.pyc` を指定し、ZIP 内に `craftlatch_auth/` ディレクトリを保つ。ハンドラー `craftlatch_auth.handler.lambda_handler`。Task 9 の `test_zip_layout_importable` と同じ規則）、Task 10 の Boundary 名
 - Produces: 出力 `login_url`・`user_pool_id`・`queue_url`・`host_user_arn`（ログに出さないため CI では参照しない）
 
 - [ ] **Step 1: `sqs.tf` と `iam.tf` を書く** — 設計書 4.4（Standard、保持 600、可視性 60、SSE-SQS、DLQ なし、TLS 以外拒否のキューポリシー）・4.5（Lambda ロールと `craftlatch-host` ユーザー、インラインポリシー、`permissions_boundary`。アクセスキーは作らない）。
@@ -594,7 +625,7 @@ git commit -m "feat(infra): GitHub OIDC と GHA 用ロール・Boundary の boot
 
 - [ ] **Step 3: `lambda.tf` と `api.tf` を書く** — Lambda（Python 3.13、arm64、128MB、10 秒、環境変数は設計書 4.3 の表、ロググループ保持 30 日）、HTTP API（IPv4、`GET /login`・`GET /callback` のみ、ペイロード 2.0、`$default` ステージ自動デプロイ、burst 5・rate 1）、Lambda の実行許可。アカウント ID は `data "aws_caller_identity"`。
 
-- [ ] **Step 4: コミット**（`fmt`・`validate`・lock ファイルは Task 12 の CI と初回 init で確認）
+- [ ] **Step 4: コミット**（`fmt`・`validate` は Task 12 の CI で、lock ファイルは Task 12 Step 5 で生成）
 
 ```bash
 git add infra/terraform
@@ -610,9 +641,9 @@ git commit -m "feat(infra): Cognito・API Gateway・Lambda・SQS・IAM を追加
 - Consumes: Secret `AWS_PLAN_ROLE_ARN`・`AWS_APPLY_ROLE_ARN`・`TF_STATE_BUCKET`、Variable `AWS_REGION`
 - Produces: `tf-summary.sh <tfplan>` が `terraform show -json` から「アドレス・操作種別」の Markdown 表と件数だけを `$GITHUB_STEP_SUMMARY` に出す
 
-- [ ] **Step 1: `ci.yml` を書く** — すべての PR と main への push。`astral-sh/setup-uv` → `uv sync` → `uv run pytest`；`shellcheck host/install.sh host/scripts/craftlatch-rotate-key host/lib/mc-stop .github/scripts/tf-summary.sh`（ubuntu ランナーに同梱）；`hashicorp/setup-terraform` → `infra/terraform` と `infra/bootstrap` で `terraform fmt -check -recursive` と `terraform init -backend=false -input=false && terraform validate`。`permissions: contents: read`。
+- [ ] **Step 1: `ci.yml` を書く** — すべての PR と main への push。`astral-sh/setup-uv` → `uv sync` → `uv run pytest`；`shellcheck host/install.sh host/scripts/craftlatch-rotate-key host/lib/mc-stop .github/scripts/tf-summary.sh`（ubuntu ランナーに同梱）；`hashicorp/setup-terraform`（`terraform_wrapper: false`）→ `infra/terraform` と `infra/bootstrap` で `terraform fmt -check -recursive` と `terraform init -backend=false -input=false -lockfile=readonly && terraform validate`。`permissions: contents: read`。
 
-- [ ] **Step 2: `terraform-plan.yml` を書く** — トリガーは `infra/terraform/**`・`src/lambda/**` を変更した PR。ジョブ条件 `if: github.event.pull_request.head.repo.full_name == github.repository`。`permissions: id-token: write, contents: read`。`configure-aws-credentials`（plan ロール）→ `terraform init -input=false -lockfile=readonly -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" > "$RUNNER_TEMP/init.log" 2>&1` → `terraform plan -input=false -no-color -out="$RUNNER_TEMP/tfplan" > "$RUNNER_TEMP/plan.log" 2>&1` → `tf-summary.sh`。失敗時はコマンド名と終了コードのみ表示。アカウント ID を `::add-mask::`。artifact・cache は使わない。
+- [ ] **Step 2: `terraform-plan.yml` を書く** — トリガーは `infra/terraform/**`・`src/lambda/**` を変更した PR。ジョブ条件 `if: github.event.pull_request.head.repo.full_name == github.repository`。`permissions: id-token: write, contents: read`。`configure-aws-credentials`（plan ロール）→ `terraform init -input=false -lockfile=readonly -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" > "$RUNNER_TEMP/init.log" 2>&1` → `terraform plan -input=false -no-color -out="$RUNNER_TEMP/tfplan" > "$RUNNER_TEMP/plan.log" 2>&1` → `tf-summary.sh`。失敗時はコマンド名と終了コードのみ表示。アカウント ID を `::add-mask::`。artifact・cache は使わない。`setup-terraform` は `terraform_wrapper: false`（ラッパーが stdout をステップ出力に保存するのを防ぐ）。最後に `if: always()` のステップで `$RUNNER_TEMP` の `*.log`・`tfplan*`・`*.json` を削除する。
 
 - [ ] **Step 3: `terraform-apply.yml` を書く** — トリガーは main への push（同じパス）と `workflow_dispatch`。`environment: production`、`concurrency: { group: terraform-apply, cancel-in-progress: false }`。plan と同じ出力抑止で `plan -out` → `git fetch origin main` して `github.sha` と `origin/main` の先頭を比較し、不一致なら apply せず成功終了してサマリーに表示 → `terraform apply -input=false "$RUNNER_TEMP/tfplan"`。サマリーにコミット SHA を表示。
 
@@ -623,6 +654,13 @@ git commit -m "feat(infra): Cognito・API Gateway・Lambda・SQS・IAM を追加
 ```bash
 git add .github
 git commit -m "ci: テスト・Terraform plan/apply のワークフローを追加"
+```
+
+- [ ] **Step 5b: lock ファイルを生成してコミットする（管理者が Terraform の入った手元の端末で実行）** — コンテナからはレジストリに接続できないため管理者に依頼する。`infra/bootstrap` と `infra/terraform` のそれぞれで `terraform init -backend=false && terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` を実行し、生成された `.terraform.lock.hcl` 2 つをコミットする（CI の `-lockfile=readonly` と初回 apply より前に必要）。
+
+```bash
+git add infra/bootstrap/.terraform.lock.hcl infra/terraform/.terraform.lock.hcl
+git commit -m "chore(infra): Terraform プロバイダーの lock ファイルを追加"
 ```
 
 - [ ] **Step 6: ブランチを push して PR を作成し、`ci` が成功することを確認する**（push・PR 作成は管理者の了承を得てから行う）
@@ -656,33 +694,63 @@ git commit -m "docs: 構築・運用・利用者向けドキュメントの初�
 
 ### Task 14: AWS 側の構築（管理者が実行、エージェントは手順の案内と結果確認）
 
-- [ ] **Step 1: 管理者が `docs/setup.md` の ①〜④ を実施する**（AWS 管理者の認証情報が必要なため、エージェントは実行しない）
-- [ ] **Step 2: 管理者が生成した `infra/bootstrap/.terraform.lock.hcl` と `infra/terraform/.terraform.lock.hcl` をコミットする**
-- [ ] **Step 3: `terraform-apply` ワークフローの結果を確認する**
+- [ ] **Step 1: 管理者が `docs/setup.md` の ①〜③ を実施する**（AWS 管理者の認証情報が必要なため、エージェントは実行しない。lock ファイルは Task 12 Step 5b でコミット済みであること）
+- [ ] **Step 2: 公開ログの抑止を確認する** — 一時ブランチで `infra/terraform` に構文は正しいが plan で失敗する変更（存在しない IAM ポリシー名の data ソース等）を入れた PR を作り、`terraform-plan` のログとジョブサマリーに Terraform の出力本文・URL・アカウント ID が出ず、「失敗したコマンド名と終了コード」だけが出ることを確認してから PR を閉じる。
+- [ ] **Step 3: 管理者が `docs/setup.md` の ④（初回 apply）を実施し、`terraform-apply` ワークフローの結果を確認する**
 
 Run: `gh run list --workflow terraform-apply.yml --limit 1`
 Expected: `completed success`。サマリーに作成リソースの一覧があり、URL やアカウント ID が出ていない。
 
-- [ ] **Step 4: 未検証事項 U8・U10・U11 の結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**（U10: もう一度 plan して Lambda の差分が出ないか。U11: apply が権限不足なく通ったか、IAM Policy Simulator で `craftlatch-gha-apply` が `craftlatch-gha-plan` を変更できないこと）
+- [ ] **Step 4: U11 — apply ロールの権限昇格防止を検証する（管理者が実行）** — `aws iam simulate-principal-policy --policy-source-arn <apply ロール ARN> --action-names <アクション> --resource-arns <ARN>` で次の表をすべて確認し、結果を記録する。
+
+| アクション | 対象 | 期待 |
+|---|---|---|
+| `iam:CreateRole` | `role/craftlatch-auth-role`（Boundary 条件あり） | allowed |
+| `iam:CreateRole` | `role/craftlatch-auth-role`（Boundary 条件なし・別 Boundary） | denied |
+| `iam:CreateRole`・`iam:PutRolePolicy` | `role/other-role` | denied |
+| `iam:PutRolePolicy`・`iam:UpdateAssumeRolePolicy`・`iam:DeleteRolePermissionsBoundary` | `role/craftlatch-gha-plan`・`role/craftlatch-gha-apply` | denied |
+| `iam:AttachRolePolicy` | `role/craftlatch-auth-role` | denied |
+| `iam:CreatePolicyVersion`・`iam:SetDefaultPolicyVersion` | `policy/craftlatch-boundary` | denied |
+| `iam:UpdateOpenIDConnectProviderThumbprint` | OIDC プロバイダー | denied |
+| `iam:PassRole` | `role/craftlatch-auth-role`（`iam:PassedToService=lambda.amazonaws.com`） | allowed |
+| `iam:PassRole` | `role/craftlatch-gha-apply` | denied |
+| `s3:GetObject`・`s3:PutObject` | `<バケット>/bootstrap/terraform.tfstate` | denied |
+| `s3:PutBucketPolicy` | `<バケット>` | denied |
+
+- [ ] **Step 5: 未検証事項 U8・U10・U11 の結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**（U8: 引数名、U10: もう一度 `workflow_dispatch` で apply して Lambda の差分が出ないか、U11: Step 3 の apply が権限不足なく通ったことと Step 4 の表）
 
 ### Task 15: Ubuntu 側の構築と結合試験（管理者が sudo を実行）
 
 - [ ] **Step 1: 管理者が `docs/setup.md` の ⑥ を実施する**（バックアップ取得、`whiteman.jar` 廃止、`python3-boto3` 導入、`minecraft` ユーザーへの移行、`server.properties` 変更、`paper.jar` リンク、アクセスキー・Webhook 配置、`sudo host/install.sh`、ユニット enable）
 
-- [ ] **Step 2: fail-closed を確認する**
+- [ ] **Step 1b: ユニットの構文を確認する**
+
+Run（管理者）: `sudo systemd-analyze verify /etc/systemd/system/craftlatch-*.service /etc/systemd/system/craftlatch-*.timer /etc/systemd/system/craftlatch-apply.path /etc/systemd/system/minecraft.service /etc/systemd/system/minecraft.socket`
+Expected: エラーなし（警告は内容を確認して記録）
+
+- [ ] **Step 2: fail-closed を確認する**（Minecraft が待ち受けている状態で確認しないと、接続失敗がファイアウォールによるものか判別できない）
 
 Run（管理者）: `sudo nft list table inet craftlatch` と `systemctl status craftlatch-firewall.service`
-Expected: 設計書 6.1 のルールが並び、`active (exited)`。認証前に外部回線から `nc -vz -w 5 <グローバルIP> 25565` がタイムアウトする。
+Expected: 設計書 6.1 のルールが並び、`active (exited)`。
 
-- [ ] **Step 3: 正常系を確認する** — 外部回線の端末でログイン → 1〜2 分で `sudo nft list set inet craftlatch allow4` に IP が現れる → Minecraft が起動し、Java 版・Bedrock 版で接続できる → 切断後 10 分で set から消える。
+続けて、LAN から認証して Minecraft を起動し（`ss -tlnp | grep 25565` で待ち受けを確認）、**認証していない外部回線**から `nc -vz -w 5 <グローバルIP> 25565` と Bedrock 版クライアントでの接続を試す。
+Expected: どちらも接続できず、`sudo nft list chain inet craftlatch input` の `tcp dport 25565 counter drop` と `udp dport 19132 counter drop` のカウンタが試行の前後で増える。
 
-- [ ] **Step 4: 無人停止とワールド保存を確認する** — 15 分無人で停止し、`journalctl -u minecraft` に `Saving worlds` 相当の出力がある（U4・U12 も観察して記録）。
+- [ ] **Step 3: 正常系と期限の延長を確認する** — 外部回線の端末でログイン → 1〜2 分で `sudo nft list set inet craftlatch allow4` に IP が現れる → Java 版で接続し、12 分以上プレイを続けても切断されず、その間 `expires` が 10 分近くに戻り続けることを数回確認する → Bedrock 版でも同じことを確認する（UDP の期限延長）→ 切断後 10 分で set から消える。
 
-- [ ] **Step 5: 異常系を確認する** — 停止処理中の認証（U3）、OS 再起動後に許可が空で Minecraft が自動起動しないこと、`/etc/craftlatch/craftlatch.nft` に `accept` を足して `restart` した場合に fwcheck が起動を拒否すること（確認後に元へ戻す）、Discord に通知が届くこと（`sudo systemctl start craftlatch-notify@test.service`）。
+- [ ] **Step 4: 実構成での FIFO 停止とワールド保存を確認する** — 15 分無人で停止し、`journalctl -u minecraft` に `Stopping server` と `Saving worlds` が出て、プロセスが SIGTERM 前に終了していること（Geyser・DriveBackupV2・Multiverse を含む実構成での U6）。U4（SIGTERM 時の保存）は確認しない場合は未検証のまま残す。
 
-- [ ] **Step 6: LAN からの接続を確認する（U13）** — LAN の端末から `192.168.33.4` に接続でき、LAN ルールのカウンタが増える。
+- [ ] **Step 5: U12 を確認する** — DriveBackupV2 の設定ファイル（`plugins/DriveBackupV2/config.yml`）でバックアップ間隔と参加・退出時の設定を確認して記録する。アップロード中に `sudo systemctl stop minecraft.service` した場合の挙動（中断・完了待ち・`TimeoutStopSec=180` 内に収まるか）を 1 回試して記録する。
 
-- [ ] **Step 7: 結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**
+- [ ] **Step 6: 異常系を確認する**
+  - 停止処理中の認証（U3 の実機確認）。
+  - 再起動による要求消失: 管理者が `sudo systemctl stop craftlatch-apply.path` で適用を止めた状態でログインし、`/run/craftlatch/requests/` に要求ファイルが置かれ SQS から削除されたことを確認 → OS を再起動 → 許可リストが空で Minecraft が自動起動しないこと → もう一度ログインすると正常に許可・起動されること。
+  - fwcheck: 本番のテーブルは変更せず、Task 0 Step 1 の `/tmp/craftlatch-probe-bad.nft` を使い `sudo unshare --net sh -c 'nft -f /tmp/craftlatch-probe-bad.nft && /usr/local/lib/craftlatch/fwcheck'; echo rc=$?` が `rc=1`、正常な `/etc/craftlatch/craftlatch.nft` では `rc=0` になること。
+  - 通知: `sudo systemctl start craftlatch-notify@test.service` で Discord に通知が届くこと。
+
+- [ ] **Step 7: LAN からの接続を確認する（U13）** — LAN の端末から `192.168.33.4` に接続でき、LAN ルールのカウンタが増える。
+
+- [ ] **Step 8: 結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**
 
 ---
 
