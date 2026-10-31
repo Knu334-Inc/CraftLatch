@@ -174,7 +174,7 @@ aws cognito-idp admin-create-user --user-pool-id <POOL_ID> --username <NAME> --t
 aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAME> --group-name minecraft
 ```
 
-一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させる。
+一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させる。ユーザー名は 5.3 の `user` の規則（`^[A-Za-z0-9._@+-]{1,128}$`）に合うものだけを作成する。Lambda も SQS に送る前に同じ規則で検証し、合わなければ送信せずエラーページ（「アカウント設定に問題があります。管理者に連絡してください」）を返してログに残す（Cognito では作成できるがホスト側で拒否される名前で、完了ページが出たのに許可されない事態を防ぐ）。
 
 ### 4.2 API Gateway HTTP API `craftlatch-api`
 
@@ -234,7 +234,7 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 {"statusCode": 200, "headers": {"content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff"}, "cookies": ["__Host-craftlatch=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax"], "body": "<!doctype html>..."}
 ```
 
-エラー時も同じ形式とし、画面には大まかな理由のみ表示し、詳細は CloudWatch Logs に残す。表示する理由の区分は「期限切れ・処理済み（再ログインしてください）」「権限がありません」「IPv4 以外からのアクセスです」「一時的なエラー（再試行してください）」の 4 種類。
+エラー時も同じ形式とし、画面には大まかな理由のみ表示し、詳細は CloudWatch Logs に残す。表示する理由の区分は「期限切れ・処理済み（再ログインしてください）」「権限がありません」「IPv4 以外からのアクセスです」「アカウント設定に問題があります（管理者に連絡してください）」「一時的なエラー（再試行してください）」の 5 種類。
 
 #### ログ
 
@@ -442,7 +442,7 @@ CPUQuota=50%
 6. AWS への接続エラー・認証エラーは、連続失敗回数を `/var/lib/craftlatch/poll-failures` に記録する。**連続失敗回数が 5 以上**のときは終了コード 1 で終了し（`OnFailure=` 発火。再通知の間隔は notify 側の 60 分抑止に任せる）、5 未満は警告ログのみで終了コード 0 とする。成功時にカウンタを 0 に戻す。
 7. 時間の上限は 2 段階で管理する。
    - API 呼び出し単位: boto3 のクライアント設定を `connect_timeout=3`、`read_timeout=5`、`retries={"total_max_attempts": 1}`（SDK 内の再試行なし。再試行は次の分の poll に任せる）とし、1 回の呼び出しは最悪約 8 秒で終わる。
-   - poll 全体: 起動時に `time.monotonic()` で期限（起動から 35 秒）を決め、期限を過ぎたら新しい API 呼び出し（Receive・Delete）を始めずに打ち切り、失敗カウンタを更新して終了する。最後に始めた呼び出しが最悪 8 秒かかっても約 43 秒で終わり、`TimeoutStartSec=50s` までにカウンタを保存できる。想定外の遅延で systemd に強制終了された場合も、poll は failed となり `OnFailure=` で通知される。
+   - poll 全体: 起動時に `time.monotonic()` で期限（起動から 35 秒）を決め、期限を過ぎたら新しい API 呼び出し（Receive・Delete）を始めずに打ち切り、失敗カウンタを更新して終了する。約 43 秒は**通常時の見積もり**である（`connect_timeout`・`read_timeout` は呼び出し全体の経過時間の上限ではなく、名前解決や複数の接続先への試行で超えうる）。**厳密な打ち切りは systemd の `TimeoutStartSec=50s` が担う。** systemd に強制終了された場合は失敗カウンタの更新は保証されず、poll は failed となって `OnFailure=` で即時に通知される（5 回連続を待たない例外経路）。この経路は通知が早まるだけで安全性に影響しないため許容する。
    - 打ち切りで削除できなかったメッセージは、可視性タイムアウト後に再配信される（重複は apply が除去する）。
 
 依存パッケージ: `python3-boto3`（Ubuntu 公式 apt パッケージ。セキュリティ更新は apt で受ける）。
@@ -518,8 +518,13 @@ apply が保持する状態（`/run/craftlatch/state/`、root:root 0755。各フ
    - `systemctl start --no-block minecraft.service` を実行する（起動済みなら何もしない）。終了コード 0 は「起動ジョブの受付成功」であり、Minecraft の起動成功ではない。起動の成否は `minecraft.service` 自身の `OnFailure=` で通知される。
    - 最後に `seen.json` に `id` を追記する。
    - 同じ回の stop 要求はすべて破棄する（allow 優先）。
-   - **一度だけの適用は保証しない（at-least-once）。** nft・状態ファイル・systemd への依頼は 1 つのトランザクションにできないため、`seen.json` の記録を最後に行い、途中で apply が異常終了した場合は「もう一度適用される」側に倒す。中断位置ごとの期待動作は次のとおり。
-     - nft 適用前に中断: 何も変わらない。要求ファイルが残っていれば次回の apply で、残っていなければ SQS の再配信で適用される。
+   - **配送と適用の保証範囲**（一度だけの適用も、必ず適用されることも保証しない）:
+     - SQS からの配送は at-least-once。poll は要求ファイルを置いてから SQS のメッセージを削除するため、それ以降の責任はローカルの要求ファイルに移る。
+     - 要求ファイルが残る中断（apply の異常終了など）では、次回の apply で処理され、副作用が重複することがある。
+     - 要求ファイルを置き SQS から削除した後、apply が処理する前に OS が再起動した場合や、要求が隔離された場合は、適用前に要求が失われる。この場合は利用者の再認証が必要（再起動時は fail-closed 側に倒れる）。
+     - 重複して再適用される回数は保証しない。受理できる期間を要求の `exp`（認証から最大 10 分）で制限する。
+   - nft・状態ファイル・systemd への依頼は 1 つのトランザクションにできないため、`seen.json` の記録を最後に行い、途中で apply が異常終了した場合は「もう一度適用される」側に倒す。中断位置ごとの期待動作は次のとおり。
+     - nft 適用前に中断: 何も変わらない。要求ファイルが残っていれば次回の apply で処理される。
      - nft 適用後・起動依頼前に中断: 許可は付与済み。再処理で期限が 10 分に戻り、起動が依頼される。
      - 起動依頼後・`seen.json` 記録前に中断: 再処理で期限の再延長と起動依頼が 1 回余分に行われる（その間に停止していれば再起動する）。
      - いずれの場合も、許可されるのは検証済みの認証済み IP のみで、再適用は要求の `exp`（認証から最大 10 分）を過ぎれば起きない。
@@ -592,7 +597,7 @@ MemoryMax=64M
 3. `127.0.0.1:25565` に Server List Ping（Handshake の next state = 1 → Status Request）を送る。
    - 接続・送受信のタイムアウト 3 秒。応答の長さ（VarInt）が 65,536 バイトを超えたら打ち切る。
    - 解析は標準 `json`（`parse_constant` で `NaN`・`Infinity` を拒否）のみで、`players.online` が `type(x) is int`（`bool` を除外）かつ `0 <= x <= 10000` であることだけを確認して取り出す。その他のフィールドは無視する。
-4. 人数が 1 以上なら `empty_since = null`、`last_stop_request = null` に戻す。0 または SLP 失敗なら、`empty_since` が null のとき現在時刻を記録する。SLP 成功（0 人）なら `probe_ok_since_empty = true`。SLP 失敗時は警告ログを出す。
+4. 人数が 1 以上なら `empty_since = null`、`probe_ok_since_empty = false`、`last_stop_request = null` に戻す（無人期間ごとに判定をやり直す）。0 または SLP 失敗なら、`empty_since` が null のとき現在時刻を記録する。SLP 成功（0 人）なら `probe_ok_since_empty = true`。SLP 失敗時は警告ログを出す。
 5. `/run/craftlatch/state/last-allow` を読み、無人期間の起点を `since = max(empty_since, last-allow)` とする（認証直後の利用者が参加する前に停止しないため）。
 6. `now - since >= idle_stop_sec`（900 秒）であり、かつ `last_stop_request` が null または 300 秒以上前なら、stop 要求を置き（`probe_ok_since_empty` が false なら `reason=probe-failure`、それ以外は `idle`。`invocation` は手順 1 の値）、`last_stop_request = now` にする。stop 要求が apply で破棄された・失われた場合でも、無人が続く限り 5 分後に再要求される。
 7. 起動中（SLP 未応答）の時間も無人として数える。起動から 15 分誰も接続しなければ停止する。
@@ -899,10 +904,10 @@ sudo systemctl enable craftlatch-idle.timer
 |---|---|---|---|
 | 1 | AWS に接続できない | poll が警告ログを出し 1 分後に再試行。5 回以上連続した時点で通知（障害継続中は notify の抑止により 60 分ごとに再通知）。メッセージは最大 10 分 SQS に残り、復旧後 `exp` 内なら処理、超過なら破棄（利用者は再認証）。Lambda → SQS の送信失敗はエラーページで再試行を案内 | 許可は増えない |
 | 2 | SQS が空 | 1 リクエストで正常終了 | — |
-| 3 | 重複配信 | apply が `seen.json` で `id` の重複を除去し、同じイベントでの期限の再延長や停止後の再起動を起こさない（`seen.json` は `/run` 上のため再起動で消えるが、再起動後は SQS 保持期間 10 分・`exp` により影響は最大でも 1 回の再適用） | 新たな許可は生じない |
+| 3 | 重複配信 | 正常処理後の重複は apply が `seen.json` で `id` を除去し、期限の再延長や停止後の再起動を起こさない。`seen.json` は `/run` 上のため再起動で消え、その後に同じイベントが届けば再適用されうる（回数は保証せず、`exp` 内に限られる） | 新たな許可は生じない（対象は認証済み IP のみ） |
 | 4 | 受信後の処理途中で失敗 | 要求ファイル配置失敗時は削除せず 60 秒後に再配信。配置後の削除失敗は #3 として処理。apply の nft 失敗時は要求を削除して通知し、利用者は再認証。nft 成功後に起動ジョブの受付が失敗した場合は許可を残して通知（ポートは待ち受けておらず無害、10 分で失効） | nft 失敗時は許可されない。部分成功時は認証済み IP の許可のみ残る |
 | 5 | メッセージの遅延 | `exp`（認証から 10 分）超過で破棄。期限内なら登録時点から 10 分の許可 | 古い許可は有効にならない |
-| 6 | Ubuntu 再起動 | `/run` は消え、許可リストは空、Minecraft は自動起動しない。ファイアウォールはネットワーク前に読み込み。起動後、期限内の SQS メッセージは通常処理 | fail-closed |
+| 6 | Ubuntu 再起動 | `/run` は消え、許可リストは空、Minecraft は自動起動しない。ファイアウォールはネットワーク前に読み込み。起動後、期限内の SQS メッセージは通常処理。要求ファイルを置き SQS から削除した後に再起動した場合、その要求は失われ利用者の再認証が必要 | fail-closed |
 | 6' | 停電などの突然の停止 | Paper の自動保存以降の変更は失われうる。UPS とバックアップを推奨（範囲外） | fail-closed |
 | 7 | Minecraft の起動失敗 | journal 記録と Discord 通知。10 分に 3 回失敗で起動を諦める。許可 IP は残るが無害で 10 分で失効 | — |
 | 8 | 起動に数分かかる | 起動中の接続試行は RST になるが、試行のたびに期限は延長される（サーバー一覧の ping でも延長） | — |
@@ -931,8 +936,8 @@ sudo systemctl enable craftlatch-idle.timer
   3. `systemctl stop craftlatch-poll.timer` で定期実行を止め、`systemctl is-active craftlatch-poll.service` が `inactive` または `failed` になるまで待つ（上限 120 秒。実行中の poll が旧キーを保持したまま成功扱いになるのを防ぐ）。上限を超えたら切り替えずに手順 7 へ進む。`failed` の場合は `systemctl reset-failed craftlatch-poll.service` を実行してから進む。
   4. 現在のファイルを `aws-credentials.old` に退避し、`.new` を `aws-credentials` へ `rename` する。
   5. `systemctl start craftlatch-poll.service` を実行し、`/var/lib/craftlatch/poll-failures` が 0 であること（新しいキーで受信に成功したこと）を確認する。
-  6. 成功したら `aws-credentials.rotated` を更新し、`systemctl start craftlatch-poll.timer` で定期実行を再開し、古いキーを `aws iam update-access-key --user-name craftlatch-host --access-key-id <OLD> --status Inactive` で無効化してから `aws iam delete-access-key --user-name craftlatch-host --access-key-id <OLD>` で削除し、`aws-credentials.old` を削除する。
-  7. 失敗時の復旧は段階で分ける。いずれも最後に新しいキーを `aws iam delete-access-key --user-name craftlatch-host --access-key-id <NEW>` で削除し、`aws-credentials.new` を削除して、終了コード 1 で終了する。
+  6. **手順 5 の受信成功をもって新しいキーを現用として確定する。** 以降は新しいキーを維持したまま、`aws-credentials.rotated` の更新、`systemctl start craftlatch-poll.timer` による定期実行の再開、古いキーの `aws iam update-access-key --user-name craftlatch-host --access-key-id <OLD> --status Inactive` による無効化と `aws iam delete-access-key --user-name craftlatch-host --access-key-id <OLD>` による削除、`aws-credentials.old` の削除を順に行う。この段階で失敗しても新しいキーは削除せず、失敗した作業名をエラーとして表示して終了コード 1 で終了する。各作業は何度実行しても同じ結果になるため、管理者は原因を除いてスクリプトを `--finish <OLD_KEY_ID>` で再実行し、残りの整理だけを行う。
+  7. 確定前（手順 2・3・5）の失敗時の復旧は段階で分ける。いずれも最後に新しいキーを `aws iam delete-access-key --user-name craftlatch-host --access-key-id <NEW>` で削除し、`aws-credentials.new` を削除して、終了コード 1 で終了する。
      - 切り替え前（手順 2・3 で失敗）: 現行の `aws-credentials` には触れない。手順 3 で timer を止めていれば `systemctl start craftlatch-poll.timer` で再開する。
      - 切り替え後（手順 5 で失敗）: `aws-credentials.old` を `aws-credentials` へ `rename` で戻し、`systemctl start craftlatch-poll.service` で旧キーでの受信成功を確認してから `systemctl start craftlatch-poll.timer` で再開する。
 - 期限に関係なく即時に更新する契機: サーバーの再構築、ディスクの交換・廃棄、バックアップ流出の疑い、管理者 PC の不審、IAM の「アクセスキー最終使用」に不審な使用履歴がある場合。
@@ -1003,7 +1008,8 @@ boto3 を使わず SigV4 署名を自作すれば負荷はさらに下がるが�
 | apply の状態遷移 | 重複 `id` の無視、同一バッチの allow 優先、`invocation` 不一致・`iat <= last-allow`・期限切れの stop の破棄、部分成功時の終了コード |
 | idle の状態遷移 | 認証直後（`last-allow` 更新）に停止しないこと、stop 要求の 5 分後の再要求、人数回復時のリセット、InvocationID 変化時の初期化 |
 | poll から apply までの結合 | 正常な SQS メッセージ相当の JSON から要求ファイル生成・apply 適用までが通ること |
-| apply の中断回復 | nft 適用前・起動依頼前・`seen.json` 記録前の各位置で中断した場合に、5.5 の期待動作（at-least-once）になること |
+| apply の中断回復 | nft 適用前・起動依頼前・`seen.json` 記録前の各位置で中断した場合に、5.5 の期待動作になること |
+| 再起動時の要求消失 | 要求ファイル配置・SQS 削除の後、apply 実行前に再起動した場合、許可が付与されず（fail-closed）、再認証で回復できること（実機） |
 | fwcheck | 6.1 のルールファイルを正規化した結果と期待構造が一致すること。先頭への無条件 `accept` の混入、ルールの欠落・順序違い、set のフラグ違いをすべて拒否すること |
 | 起動条件 | 実際の `ExecStart`（`python3 -E -s`）と同じ条件で `common.py` を import できること |
 | nft コマンド生成 | 生成されるトランザクション文字列の単体テスト（不正な IP が混入しないこと） |
