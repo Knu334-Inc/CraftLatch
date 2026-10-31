@@ -31,7 +31,7 @@
 ### 1.2 要件の解釈（合意済み）
 
 - 「通信のたびに 10 分延長」により、**接続中は失効しない**。失効は実質「最後のパケットから 10 分後」（切断後 10 分）。プレイ中の強制再認証は行わない。
-- 「失効後は再度 Cognito 認証が必要」は、**毎回 ID/パスワード入力を強制**する（`prompt=login` + `auth_time` 検証）。
+- 「失効後は再度 Cognito 認証が必要」は、**毎回 ID/パスワード入力を強制**する（`prompt=login` + `auth_time` 検証）。厳密な保証範囲は「直近 120 秒以内に入力があったこと」（4.3）。
 - MFA は使用しない。
 
 ---
@@ -107,7 +107,7 @@
 2. Lambda が state・nonce・code_verifier を生成し、`__Host-craftlatch` Cookie に保存して Cognito の authorize エンドポイントへ 302 リダイレクトする（`prompt=login`、`code_challenge_method=S256`）。
 3. 利用者がユーザー名とパスワードを入力し、`/callback?code=...&state=...` に戻る。
 4. Lambda が state を照合し、トークン交換と ID トークンのクレーム検証を行い、`requestContext.http.sourceIp` を取得・検証して SQS に許可イベントを送信する。完了ページに登録 IP を表示する。
-5. 最大 60 秒以内に poll service がメッセージを受信・検証し、要求ファイルを置いてから SQS から削除する。
+5. 通常 1 分程度で poll service がメッセージを受信・検証し（毎分の起動に処理時間・通信時間が加わるため厳密な上限ではない）、要求ファイルを置いてから SQS から削除する。
 6. path unit が apply service を起動し、apply が要求を再検証して nft の set に IP を登録し、`minecraft.service` を起動する（起動済みなら何もしない）。
 7. 以降、許可 IP からのパケットが届くたびに期限が 10 分延長される。最後のパケットから 10 分で自動失効する。
 8. Minecraft 稼働中は idle service が毎分人数を取得し、15 分連続で 0 人なら stop 要求を置き、apply が正常停止させる。
@@ -133,7 +133,7 @@
 ```
 infra/terraform/          versions.tf backend.tf variables.tf cognito.tf api.tf lambda.tf sqs.tf iam.tf budgets.tf outputs.tf
 src/lambda/craftlatch_auth/handler.py
-host/lib/                 common.py poll.py apply.py idle.py notify.py mc-stop
+host/lib/                 common.py poll.py apply.py idle.py notify.py fwcheck mc-stop
 host/systemd/             *.service *.timer *.path *.socket
 host/nftables/craftlatch.nft
 host/tmpfiles.d/craftlatch.conf
@@ -203,7 +203,7 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 | `REDIRECT_URI` | `https://<api-id>.execute-api.ap-northeast-1.amazonaws.com/callback` |
 | `QUEUE_URL` | `craftlatch-grants` の URL |
 | `ALLOWED_GROUP` | `minecraft` |
-| `MAX_AUTH_AGE` | `300` |
+| `MAX_AUTH_AGE` | `120` |
 | `GRANT_TTL` | `600` |
 
 #### `/login`
@@ -220,10 +220,11 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 3. `https://<COGNITO_DOMAIN>/oauth2/token` に `grant_type=authorization_code`、`client_id`、`code`、`redirect_uri`、`code_verifier` を POST する（`urllib.request`、タイムアウト 5 秒）。
 4. ID トークンを検証する。
    - 署名検証は行わない。OIDC Core 3.1.3.7 (6) により、トークンエンドポイントから TLS で直接受け取った ID トークンは TLS のサーバー検証で代替できる。代替案（Node.js + `aws-jwt-verify` による署名検証）は依存が増えるため不採用。
-   - `iss == ISSUER`、`aud == CLIENT_ID`、`token_use == "id"`、`exp > now`、`nonce == Cookie の nonce`、`now - auth_time <= MAX_AUTH_AGE`、`ALLOWED_GROUP in cognito:groups` をすべて確認する。
+   - `iss == ISSUER`、`aud == CLIENT_ID`、`token_use == "id"`、`exp > now`、`nonce == Cookie の nonce`、`auth_time` が整数で `now - MAX_AUTH_AGE <= auth_time <= now + 60`（未来の値も拒否）、`cognito:groups` が文字列の配列で `ALLOWED_GROUP` を含む、をすべて確認する。
+   - **保証の範囲**: `prompt=login` は利用者のブラウザ側で外せるため、「毎回入力」の保証は `auth_time` の検証によるもので、厳密には「直近 `MAX_AUTH_AGE` 秒以内にパスワード入力があったこと」である。利用者本人が `prompt=login` を外した認可要求を自作すれば、直前の入力から `MAX_AUTH_AGE` 秒以内に限り入力を省略できる。Cookie を署名して取引開始時刻と `auth_time` を結び付ければ解消できるが、署名鍵の管理（Terraform の state に秘密を置かない方針との両立）が必要になるため採用せず、`MAX_AUTH_AGE` を 120 秒に短縮して残存リスクとして受容する。
 5. `requestContext.http.sourceIp` を `ipaddress.ip_address()` で解析し、`IPv4Address` かつ `is_global` であることを確認する。`X-Forwarded-For` 等のヘッダーは使わない。
 6. SQS に送信する: `{"v":1,"type":"allow","ip":"203.0.113.5","iat":<now>,"exp":<now+GRANT_TTL>,"id":"<uuid4>","user":"<cognito:username>"}`
-7. 完了ページ（登録 IP、「最大 1 分 + サーバー起動時間をお待ちください」）を返し、Cookie を削除する。
+7. 完了ページ（登録 IP、「通常 1 分程度 + サーバー起動時間をお待ちください」）を返し、Cookie を削除する。
 
 #### レスポンス形式
 
@@ -323,7 +324,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin craftlatch
 |---|---|---|---|
 | `/media/ssd/paper/` | minecraft:minecraft | 0750 | サーバー本体・ワールド・plugins・設定。Paper が `cache/`・`libraries/`・`plugins/` に書き込むため全体を minecraft 所有とする（jar のみ root 所有にしても、ディレクトリ所有者は置換できるため保護にならない） |
 | `/media/ssd/paper/paper.jar` | minecraft:minecraft | シンボリックリンク | 実体 `paper-<ver>-<build>.jar` へのリンク |
-| `/usr/local/lib/craftlatch/` | root:root | 0755（各ファイル 0755/0644） | `common.py` `poll.py` `apply.py` `idle.py` `notify.py` `mc-stop` |
+| `/usr/local/lib/craftlatch/` | root:root | 0755（各ファイル 0755/0644） | `common.py` `poll.py` `apply.py` `idle.py` `notify.py` `fwcheck` `mc-stop` |
 | `/etc/craftlatch/config.json` | root:root | 0644 | キュー URL、リージョン、ポート、タイムアウト値（秘密情報なし） |
 | `/etc/craftlatch/aws-credentials` | root:root | 0400 | アクセスキー（AWS 共有クレデンシャル形式、プロファイル `default`） |
 | `/etc/craftlatch/aws-credentials.rotated` | root:root | 0644 | キー更新日（`YYYY-MM-DD`） |
@@ -332,6 +333,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin craftlatch
 | `/run/craftlatch/` | root:root | 0755 | |
 | `/run/craftlatch/requests/` | root:craftlatch | 1770 | 要求ファイル |
 | `/run/craftlatch/quarantine/` | root:root | 0700 | 不正な要求ファイルの隔離先 |
+| `/run/craftlatch/state/` | root:root | 0755（各ファイル 0644） | apply の状態（`last-allow`、`seen.json`）。idle が読み取る |
 | `/var/lib/craftlatch/` | craftlatch:craftlatch | 0700 | idle の状態ファイル（`StateDirectory=`） |
 | `/var/lib/private/craftlatch-notify/` | systemd 管理 | — | notify の送信履歴（`DynamicUser=` + `StateDirectory=`） |
 
@@ -341,6 +343,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin craftlatch
 d /run/craftlatch 0755 root root -
 d /run/craftlatch/requests 1770 root craftlatch -
 d /run/craftlatch/quarantine 0700 root root -
+d /run/craftlatch/state 0755 root root -
 ```
 
 `requests/` を root 所有 1770 にする理由: apply service は `CAP_DAC_OVERRIDE` を持たない root として動く。ディレクトリ所有者であれば中のファイルを一覧・削除でき、ファイルを 0644 で作れば読める。`craftlatch` はグループ書き込み権限でファイルを置ける。その他のローカルユーザーは入れない。`/run` は tmpfs のため、再起動で未処理の要求は消える（fail-closed）。
@@ -356,8 +359,22 @@ d /run/craftlatch/quarantine 0700 root root -
 - ファイル名: `<epoch>-<uuid>.req`。`.tmp-<uuid>` で書き込み、`fsync` 後に `rename` で改名する（path unit は `*.req` のみに反応する）。
 - 権限: 0644、所有者 `craftlatch`。
 - 内容: 1 行の JSON、1024 バイト以下。
-  - `{"v":1,"action":"allow","ip":"203.0.113.5","exp":1793460600,"id":"<uuid>","user":"alice"}`
-  - `{"v":1,"action":"stop","reason":"idle"}` または `"reason":"probe-failure"`
+  - allow: `{"v":1,"action":"allow","ip":"203.0.113.5","iat":1793460000,"exp":1793460600,"id":"<uuid>","user":"alice"}`（SQS メッセージの `ip`・`iat`・`exp`・`id`・`user` をそのまま引き継ぐ）
+  - stop: `{"v":1,"action":"stop","reason":"idle","invocation":"<32桁hex>","iat":1793461000,"exp":1793461120}`（`reason` は `idle` または `probe-failure`。`invocation` は idle が観測した `minecraft.service` の InvocationID。`exp = iat + 120`）
+
+#### フィールドの検証規則（poll・apply・idle で共通の `common.py` に実装する）
+
+| フィールド | 規則 |
+|---|---|
+| JSON 全体 | `json.loads(..., parse_constant=<例外を送出>)` で `NaN`・`Infinity` を拒否。トップレベルはオブジェクト。未知のキーは拒否 |
+| `v` | `type(v) is int` かつ `v == 1` |
+| `action` / `type` | 既定値の文字列のいずれか |
+| `iat` / `exp` | `type(x) is int`（`bool` を除外）、`0 < iat < exp`、`exp - iat <= 900`、`iat <= now + 60`、`now < exp` |
+| `ip` | `str`、`ipaddress.IPv4Address(ip)` が成功し `is_global`、かつ `str(IPv4Address(ip)) == ip`（正規形のみ受理） |
+| `id` | `str`、`uuid.UUID(id)` が成功し、`str(UUID(id)) == id` |
+| `user` | `str`、`^[A-Za-z0-9._@+-]{1,128}$` |
+| `reason` | `idle` または `probe-failure` |
+| `invocation` | `str`、`^[0-9a-f]{32}$` |
 
 ### 5.4 `craftlatch-poll.timer` / `craftlatch-poll.service`
 
@@ -417,10 +434,11 @@ CPUQuota=50%
 
 1. `aws-credentials.rotated` の日付から `key_warn_days`（335 日）を超えていれば journal に警告を出す。
 2. `ReceiveMessage(MaxNumberOfMessages=10, WaitTimeSeconds=1)` を呼ぶ。メッセージが返る間は繰り返す（最大 5 回）。
-3. 各メッセージについて、本文が 1024 バイト以下の JSON で、`v == 1`、`type == "allow"`、`ip` が `IPv4Address` かつ `is_global`、`now < exp`、`exp - iat <= 900`、`iat <= now + 60`、`id` が UUID 形式、`user` が `^[A-Za-z0-9._@+-]{1,128}$` であることを確認する。
+3. 各メッセージについて、本文が 1024 バイト以下であることを確認し、5.3 の検証規則（`type == "allow"`）で検証する。
 4. 有効なら要求ファイルを置き、その後 `DeleteMessage` する。無効ならログ出力後に `DeleteMessage` する。
 5. 要求ファイルの配置に失敗した場合は削除しない（60 秒後に再配信される）。
-6. AWS への接続エラー・認証エラーは、連続失敗回数を `/var/lib/craftlatch/poll-failures` に記録する。5 回連続に達したときのみ終了コード 1 で終了し（`OnFailure=` 発火）、それ未満は警告ログのみで終了コード 0 とする。成功時にカウンタを 0 に戻す。
+6. AWS への接続エラー・認証エラーは、連続失敗回数を `/var/lib/craftlatch/poll-failures` に記録する。**連続失敗回数が 5 以上**のときは終了コード 1 で終了し（`OnFailure=` 発火。再通知の間隔は notify 側の 60 分抑止に任せる）、5 未満は警告ログのみで終了コード 0 とする。成功時にカウンタを 0 に戻す。
+7. boto3 のクライアント設定は `connect_timeout=5`、`read_timeout=10`、`retries={"total_max_attempts": 2, "mode": "standard"}` とし、最悪でも `TimeoutStartSec=50s` 内に失敗カウンタの更新まで到達させる。
 
 依存パッケージ: `python3-boto3`（Ubuntu 公式 apt パッケージ。セキュリティ更新は apt で受ける）。
 
@@ -451,6 +469,7 @@ OnFailure=craftlatch-notify@%n.service
 Type=oneshot
 User=root
 ExecStart=/usr/bin/python3 -I /usr/local/lib/craftlatch/apply.py
+TimeoutStartSec=30s
 SyslogIdentifier=craftlatch-apply
 CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=yes
@@ -473,16 +492,35 @@ SystemCallArchitectures=native
 
 `apply.py` の処理（1 回の実行で、その時点の要求をすべてまとめて処理する。最大 100 件）:
 
-1. `requests/` 内の `*.req` を列挙する。各ファイルを `O_RDONLY | O_NOFOLLOW` で開き、`fstat` で通常ファイル・所有者 uid が `craftlatch`・サイズ 1024 バイト以下であることを確認し、JSON を検証する（`action` が `allow` なら poll と同じ検証、`stop` なら `reason` が既定値のいずれか）。不合格のファイルは `quarantine/` へ移動する（隔離先は最大 100 件。超えたら古いものから削除）。
-2. allow 要求がある場合:
-   - IP ごとに `add element inet craftlatch allow4 { <ip> }` → `delete element inet craftlatch allow4 { <ip> }` → `add element inet craftlatch allow4 { <ip> timeout 10m }` を生成し、すべてを 1 回のトランザクションとして `nft -f -` の標準入力に渡す。最初の `add` は未登録時に `delete` が失敗しないようにするため。トランザクションなので接続中の通信は途切れない。IP 文字列は `ipaddress.IPv4Address` で解析し直したものだけを使う。
-   - `systemctl start --no-block minecraft.service` を実行する（起動済みなら何もしない）。
-   - 同じ回に stop 要求があっても無視する（allow 優先）。
-3. stop 要求のみの場合: `systemctl stop --no-block minecraft.service` を実行する。
-4. 処理したファイルは成否にかかわらず削除する（失敗時は隔離）。必ず片付けることで、path unit が起動を繰り返す事態を防ぐ。
-5. 外部コマンドは `subprocess.run([...], shell=False, timeout=10)` で呼ぶ。
-6. ログ: `event=allow ip=... user=... id=... result=ok`、`event=stop reason=idle result=ok`。
-7. nft または systemctl が失敗した場合は終了コード 1 で終了する（`OnFailure=` 発火）。
+apply が保持する状態（`/run/craftlatch/state/`、root:root 0755。各ファイル 0644 で、idle が読み取る）:
+
+- `last-allow`: 最後に allow を適用した時刻（epoch 秒、1 行）。
+- `seen.json`: 適用済みの allow の `id` とその `exp`（`{"<id>": <exp>}`）。`exp` を過ぎたものは毎回削除する。
+- 書き込みは一時ファイル + `rename` で原子的に行う。
+
+`apply.py` の処理（1 回の実行で、その時点の要求をすべてまとめて処理する。最大 100 件）:
+
+1. `requests/` 内の `*.req` を列挙する。ファイルごとに次を行い、**1 件の例外が後続の処理を止めないよう、ファイル単位で例外を捕捉する。**
+   - `os.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` で開き（FIFO やデバイスファイルでブロックしないため）、直後の `fstat` で通常ファイル・所有者 uid が `craftlatch`・サイズ 1024 バイト以下であることを確認する。
+   - 最大 1025 バイトを読み、読み取った長さが 1024 バイト以下であることを再確認する（`fstat` 後のサイズ変更対策）。
+   - 5.3 の検証規則で検証する。
+   - 不合格のファイルは `quarantine/` へ移動する（隔離先は最大 100 件。超えたら古いものから削除）。移動に失敗したら `unlink` し、それも失敗したらエラーログを出して終了コード 1 とする。
+2. allow 要求の重複除去: `id` が `seen.json` にある要求は「処理済み」としてログに残し、適用しない（SQS の重複配信・削除失敗による再配信で、期限の再延長や停止後の再起動を起こさないため）。
+3. 残った allow 要求がある場合:
+   - IP ごとに `add element inet craftlatch allow4 { <ip> }` → `delete element inet craftlatch allow4 { <ip> }` → `add element inet craftlatch allow4 { <ip> timeout 10m }` を生成し、すべてを 1 回のトランザクションとして `nft -f -` の標準入力に渡す。最初の `add` は未登録時に `delete` が失敗しないようにするため。トランザクションなので接続中の通信は途切れない。IP 文字列は検証済みの正規形のみを使う。
+   - nft が成功したら `seen.json` に `id` を追記し、`last-allow` を現在時刻に更新する。
+   - `systemctl start --no-block minecraft.service` を実行する（起動済みなら何もしない）。終了コード 0 は「起動ジョブの受付成功」であり、Minecraft の起動成功ではない。起動の成否は `minecraft.service` 自身の `OnFailure=` で通知される。
+   - 同じ回の stop 要求はすべて破棄する（allow 優先）。
+4. stop 要求のみの場合、次をすべて満たす stop 要求が 1 件以上あれば `systemctl stop --no-block minecraft.service` を実行する。満たさない要求は「失効」としてログに残して破棄する（隔離はしない）。
+   - `now < exp`
+   - `invocation` が現在の `systemctl show -p InvocationID --value minecraft.service` と一致する（以前の起動世代に対する停止要求を適用しない）
+   - `iat > last-allow`（停止判定より後に認証が届いていれば停止しない）
+   - `minecraft.service` の `ActiveState` が `active`
+5. 処理したファイルは成否にかかわらず削除する（失敗時は隔離）。必ず片付けることで、path unit が起動を繰り返す事態を防ぐ。
+6. 外部コマンドは `subprocess.run([...], shell=False, timeout=10)` で呼ぶ。
+7. ログ: `event=allow ip=... user=... id=... nft=ok start_job=ok`、`event=allow id=... result=duplicate`、`event=stop reason=idle result=ok|stale`。
+8. 部分成功の扱い: nft 成功後に `systemctl start` の受付が失敗した場合、**追加した許可は残す**（何も待ち受けていないポートへの許可は無害で、10 分で失効する。取り消し処理で既存の許可を誤って消す危険を避ける）。この場合と nft の失敗時は終了コード 1 で終了する（`OnFailure=` 発火）。利用者は再認証で再試行する。
+9. 終了コード 1 で終わり要求ファイルが残った場合、path unit は即座に apply を再起動する。繰り返し失敗すると path unit のトリガー上限に達して path unit 自体が failed になる。この状態は apply の `OnFailure=` 通知で検知し、原因を除いた後 `sudo systemctl restart craftlatch-apply.path` で復旧する。
 
 ### 5.6 `craftlatch-idle.timer` / `craftlatch-idle.service`
 
@@ -538,13 +576,14 @@ MemoryMax=64M
 `idle.py` の処理:
 
 1. `systemctl show -p InvocationID --value minecraft.service` を取得する。
-2. 状態ファイル `/var/lib/craftlatch/idle.json`（`{"invocation": "...", "empty_since": <epoch|null>, "stop_requested": false}`）を読み、InvocationID が異なれば初期化する。
+2. 状態ファイル `/var/lib/craftlatch/idle.json`（`{"invocation": "...", "empty_since": <epoch|null>, "probe_ok_since_empty": false, "last_stop_request": <epoch|null>}`）を読み、InvocationID が異なれば初期化する。
 3. `127.0.0.1:25565` に Server List Ping（Handshake の next state = 1 → Status Request）を送る。
    - 接続・送受信のタイムアウト 3 秒。応答の長さ（VarInt）が 65,536 バイトを超えたら打ち切る。
-   - 解析は標準 `json` のみで、`players.online` が 0 以上の整数であることだけを確認して取り出す。その他のフィールドは無視する。
-4. 人数が 1 以上なら `empty_since = null`。0 または SLP 失敗なら、`empty_since` が null のとき現在時刻を記録する。SLP 失敗時は警告ログを出す。
-5. `now - empty_since >= idle_stop_sec`（900 秒）かつ `stop_requested == false` なら stop 要求を置き（全期間 SLP 失敗なら `reason=probe-failure`、それ以外は `idle`）、`stop_requested = true` にする。
-6. 起動中（SLP 未応答）の時間も無人として数える。起動から 15 分誰も接続しなければ停止する。
+   - 解析は標準 `json`（`parse_constant` で `NaN`・`Infinity` を拒否）のみで、`players.online` が `type(x) is int`（`bool` を除外）かつ `0 <= x <= 10000` であることだけを確認して取り出す。その他のフィールドは無視する。
+4. 人数が 1 以上なら `empty_since = null`、`last_stop_request = null` に戻す。0 または SLP 失敗なら、`empty_since` が null のとき現在時刻を記録する。SLP 成功（0 人）なら `probe_ok_since_empty = true`。SLP 失敗時は警告ログを出す。
+5. `/run/craftlatch/state/last-allow` を読み、無人期間の起点を `since = max(empty_since, last-allow)` とする（認証直後の利用者が参加する前に停止しないため）。
+6. `now - since >= idle_stop_sec`（900 秒）であり、かつ `last_stop_request` が null または 300 秒以上前なら、stop 要求を置き（`probe_ok_since_empty` が false なら `reason=probe-failure`、それ以外は `idle`。`invocation` は手順 1 の値）、`last_stop_request = now` にする。stop 要求が apply で破棄された・失われた場合でも、無人が続く限り 5 分後に再要求される。
+7. 起動中（SLP 未応答）の時間も無人として数える。起動から 15 分誰も接続しなければ停止する。
 
 **残存リスク**: SLP 応答は Minecraft サーバー由来の信頼できない入力である。Paper が侵害された場合、細工した応答で idle の解析処理を攻撃される可能性があるが、サイズ上限・タイムアウト・標準 `json` のみ・整数 1 つのみ取り出し、という制限により、成立には CPython の `json` の脆弱性が必要となる。成立した場合でも得られるのは `craftlatch` ユーザーの権限（SQS の受信・削除、要求ファイル配置）である。この程度のため、ユーザーを分けずに受容する。
 
@@ -641,16 +680,16 @@ WantedBy=sysinit.target
 - ネットワークが立ち上がる前にルールを読み込む。
 - **`ExecStop` は定義しない。** UFW 無効のため、テーブルが消えると全員に開放されるため。
 - 読み込みに失敗すると failed になり、依存する `minecraft.service` は起動できない（fail-closed）。
-- ルール変更時は `sudo systemctl restart craftlatch-firewall.service` を実行する。`Requires=` により Minecraft も再起動され、許可リストも空になる（メンテナンス作業として扱う）。
+- ルール変更時は `sudo systemctl restart craftlatch-firewall.service` を実行する。これはメンテナンス作業として扱う。Minecraft は `Requires=` により停止しうるが、再起動後に自動で再開することは前提にしない。許可リストも空になるため、Minecraft は利用者の次の認証で起動される（手動で起動する場合は `sudo systemctl start minecraft.service`）。
 
 ### 6.3 fail-closed の保証
 
 | 状況 | 保証の仕組み |
 |---|---|
 | OS 起動直後 | ファイアウォールがネットワークより先に読み込まれ、許可リストは空。Minecraft は自動起動しない |
-| ルール読み込み失敗 | `minecraft.service` の `Requires=` と `ExecStartPre=+/usr/sbin/nft list table inet craftlatch` で起動不可 |
+| ルール読み込み失敗・ルールの欠落 | `minecraft.service` の `Requires=` と `ExecStartPre=+/usr/local/lib/craftlatch/fwcheck` で起動不可。fwcheck は `nft -j list table inet craftlatch` の出力を解析し、input hook のチェイン、`allow4` set（`dynamic`・`timeout` フラグ）、TCP/25565 と UDP/19132 の drop ルールがすべて存在することを確認する。これは設定事故の検出であり、root による意図的な改変を防ぐものではない |
 | ファイアウォールユニットの停止操作 | `ExecStop` がないためテーブルは残る。`Requires=` により Minecraft は停止する |
-| 処理途中の失敗 | 許可は追加されない方向に倒れる |
+| 処理途中の失敗 | 許可の対象は常に検証済みの認証済み IP のみ。nft 失敗時は追加されず、起動ジョブ受付の失敗時は追加済みの許可が期限まで残る（5.5 の部分成功の扱い） |
 | ネットワーク障害 | 新規の許可が届かないだけで、既存の許可は期限どおり失効する |
 
 ### 6.4 動作確認方法
@@ -729,7 +768,7 @@ Type=simple
 User=minecraft
 Group=minecraft
 WorkingDirectory=/media/ssd/paper
-ExecStartPre=+/usr/sbin/nft list table inet craftlatch
+ExecStartPre=+/usr/local/lib/craftlatch/fwcheck
 ExecStart=/usr/bin/java -Xms4G -Xmx4G -jar /media/ssd/paper/paper.jar --nogui
 ExecStop=/usr/local/lib/craftlatch/mc-stop $MAINPID
 StandardInput=socket
@@ -839,10 +878,10 @@ sudo systemctl enable craftlatch-idle.timer
 
 | # | ケース | 挙動 | 未認証アクセス |
 |---|---|---|---|
-| 1 | AWS に接続できない | poll が警告ログを出し 1 分後に再試行。5 回連続で通知。メッセージは最大 10 分 SQS に残り、復旧後 `exp` 内なら処理、超過なら破棄（利用者は再認証）。Lambda → SQS の送信失敗はエラーページで再試行を案内 | 許可は増えない |
+| 1 | AWS に接続できない | poll が警告ログを出し 1 分後に再試行。5 回以上連続した時点で通知（障害継続中は notify の抑止により 60 分ごとに再通知）。メッセージは最大 10 分 SQS に残り、復旧後 `exp` 内なら処理、超過なら破棄（利用者は再認証）。Lambda → SQS の送信失敗はエラーページで再試行を案内 | 許可は増えない |
 | 2 | SQS が空 | 1 リクエストで正常終了 | — |
-| 3 | 重複配信 | add→delete→add は期限を 10 分に戻すだけ。`systemctl start` は起動済みなら無操作 | — |
-| 4 | 受信後の処理途中で失敗 | 要求ファイル配置失敗時は削除せず 60 秒後に再配信。配置後の削除失敗は #3 として処理。apply の nft 失敗時は要求を隔離して通知、利用者は再認証 | 許可しない方向に倒れる |
+| 3 | 重複配信 | apply が `seen.json` で `id` の重複を除去し、同じイベントでの期限の再延長や停止後の再起動を起こさない（`seen.json` は `/run` 上のため再起動で消えるが、再起動後は SQS 保持期間 10 分・`exp` により影響は最大でも 1 回の再適用） | 新たな許可は生じない |
+| 4 | 受信後の処理途中で失敗 | 要求ファイル配置失敗時は削除せず 60 秒後に再配信。配置後の削除失敗は #3 として処理。apply の nft 失敗時は要求を削除して通知し、利用者は再認証。nft 成功後に起動ジョブの受付が失敗した場合は許可を残して通知（ポートは待ち受けておらず無害、10 分で失効） | nft 失敗時は許可されない。部分成功時は認証済み IP の許可のみ残る |
 | 5 | メッセージの遅延 | `exp`（認証から 10 分）超過で破棄。期限内なら登録時点から 10 分の許可 | 古い許可は有効にならない |
 | 6 | Ubuntu 再起動 | `/run` は消え、許可リストは空、Minecraft は自動起動しない。ファイアウォールはネットワーク前に読み込み。起動後、期限内の SQS メッセージは通常処理 | fail-closed |
 | 6' | 停電などの突然の停止 | Paper の自動保存以降の変更は失われうる。UPS とバックアップを推奨（範囲外） | fail-closed |
@@ -850,9 +889,9 @@ sudo systemctl enable craftlatch-idle.timer
 | 8 | 起動に数分かかる | 起動中の接続試行は RST になるが、試行のたびに期限は延長される（サーバー一覧の ping でも延長） | — |
 | 9 | 複数ユーザーの同時認証 | apply が 1 回でまとめて処理。上限 256 件 | — |
 | 10 | 期限切れ直前の通信 | パケットが 1 つでも届けば延長。期限後のパケット（TCP 再送含む）は破棄され、接続は切れて再認証が必要 | 境界は安全側 |
-| 11 | 停止処理中に新しい認証 | apply が `start --no-block` を投入し、systemd は停止完了後に起動する想定（**実機確認事項**）。idle の状態は InvocationID の変化で初期化 | — |
-| 12 | プレイヤー不在検知の失敗 | SLP 失敗は 0 人と同じ扱い（警告ログ）。15 分失敗が続けば `probe-failure` で停止。idle service 自体の失敗は通知 | — |
-| 13 | アクセスキーの失効・誤設定 | poll が AccessDenied を記録し、5 回連続で通知 | 許可は増えない |
+| 11 | 停止処理中に新しい認証 | apply が `start --no-block` を投入し、systemd は停止完了後に起動する想定（**実機確認事項**）。idle の状態は InvocationID の変化で初期化。停止判定より後に届いた認証がある stop（`iat > last-allow` を満たさない）や、以前の起動世代向けの stop は apply が破棄する | — |
+| 12 | プレイヤー不在検知の失敗 | SLP 失敗は 0 人と同じ扱い（警告ログ）。15 分失敗が続けば `probe-failure` で停止。stop 要求が破棄・喪失しても、無人が続く限り 5 分ごとに再要求。idle service 自体の失敗は通知 | — |
+| 13 | アクセスキーの失効・誤設定 | poll が AccessDenied を記録し、5 回以上連続した時点で通知（以降 60 分ごと） | 許可は増えない |
 | 14 | Cognito / API Gateway / Lambda の障害 | 新規認証不可。接続中のセッションは影響なし | — |
 | 15 | 時計のずれ | systemd-timesyncd を前提とし、`iat > now + 60` のメッセージは破棄 | — |
 | 16 | 正規利用者による認証の連打 | API のスロットリング（1 rps、burst 5）。起動済みなら無操作 | — |
@@ -868,10 +907,13 @@ sudo systemctl enable craftlatch-idle.timer
 
 - 間隔: 365 日。335 日経過で poll が警告を出す。CIS AWS Foundations Benchmark の推奨（90 日）からは外れるが、キーの権限が SQS の受信・削除のみで漏えい時の影響が小さいため。
 - 手順: 管理者用スクリプト `craftlatch-rotate-key` を Ubuntu 上で root として実行する。管理者の一時的な認証情報（`AWS_PROFILE` 等）を使い、その権限はサーバーに残さない。スクリプトは次を順に行う。
-  1. `aws iam create-access-key --user-name craftlatch-host` で新しいキーを発行する。
-  2. `/etc/craftlatch/aws-credentials` を一時ファイル経由で原子的に置き換え、`aws-credentials.rotated` を更新する。
-  3. `systemctl start craftlatch-poll.service` を実行し、成功を確認する。
-  4. 古いキーを `aws iam update-access-key --user-name craftlatch-host --access-key-id <OLD> --status Inactive` で無効化し、`aws iam delete-access-key --user-name craftlatch-host --access-key-id <OLD>` で削除する。
+  1. `aws iam create-access-key --user-name craftlatch-host` で新しいキーを発行し、`/etc/craftlatch/aws-credentials.new`（root:root 0400）に書き出す。
+  2. 新しいキー単体で `AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new aws sts get-caller-identity` を実行し、返る ARN が `craftlatch-host` であることを確認する（IAM の反映遅延に備え、最大 60 秒再試行）。`GetCallerIdentity` は IAM 権限なしで呼べるため、受信権限のないキーでも検証できる。SQS の権限はユーザー単位のポリシーなので新旧キーで同一。
+  3. `systemctl stop craftlatch-poll.timer` で定期実行を止め、`systemctl is-active craftlatch-poll.service` が `inactive` になるまで待つ（実行中の poll が旧キーを保持したまま成功扱いになるのを防ぐ）。
+  4. 現在のファイルを `aws-credentials.old` に退避し、`.new` を `aws-credentials` へ `rename` する。
+  5. `systemctl start craftlatch-poll.service` を実行し、`/var/lib/craftlatch/poll-failures` が 0 であること（新しいキーで受信に成功したこと）を確認する。
+  6. 成功したら `aws-credentials.rotated` を更新し、`systemctl start craftlatch-poll.timer` で定期実行を再開し、古いキーを `aws iam update-access-key --user-name craftlatch-host --access-key-id <OLD> --status Inactive` で無効化してから `aws iam delete-access-key --user-name craftlatch-host --access-key-id <OLD>` で削除し、`aws-credentials.old` を削除する。
+  7. 手順 2 または 5 で失敗したら、`aws-credentials.old` を元に戻し、定期実行を再開し、新しいキーを `aws iam delete-access-key --user-name craftlatch-host --access-key-id <NEW>` で削除して、終了コード 1 で終了する。
 - 期限に関係なく即時に更新する契機: サーバーの再構築、ディスクの交換・廃棄、バックアップ流出の疑い、管理者 PC の不審、IAM の「アクセスキー最終使用」に不審な使用履歴がある場合。
 
 ### 9.2 漏えい時の対応
@@ -913,7 +955,7 @@ sudo systemctl enable craftlatch-idle.timer
 | IAM | — | 無料 | $0 | — |
 | AWS Budgets（監視予算 1 件） | — | 監視予算は無料 | $0 | — |
 | データ転送 | 数 MB | 毎月 100 GB | $0 | — |
-| **合計** | | | **約 $0** | **無料枠なしでも月 $0.05 未満** |
+| **合計** | | | **約 $0** | **無料枠を一切除いた場合: 約 $0.20/月**（Cognito 10 MAU × $0.015 = $0.15 が大半） |
 
 - 東京リージョンの単価は未確認（公式料金ページを直接参照できなかったため us-east-1 の単価で試算）。AWS Pricing Calculator で確認する。
 - 2025-07-15 以降に作成したアカウントは、Free プランから Paid プランへの切り替えが一定期間後に必要。Paid プランでも期限のない無料枠（Lambda、SQS、Cognito 等）は適用される。
@@ -936,7 +978,10 @@ boto3 を使わず SigV4 署名を自作すれば負荷はさらに下がるが�
 | 対象 | 方法 |
 |---|---|
 | Lambda のロジック | pytest による単体テスト。state 不一致・nonce 不一致・`auth_time` 超過・グループ外・IPv6/プライベート IP・トークン交換失敗の各ケースを、`urllib` と boto3 をモックして検証 |
-| `host/lib` の検証関数 | pytest による単体テスト。メッセージ・要求ファイルの正常系/異常系（サイズ超過、型不正、期限切れ、未来の `iat`、シンボリックリンク、所有者不一致） |
+| `host/lib` の検証関数 | pytest による単体テスト。メッセージ・要求ファイルの正常系/異常系（サイズ超過、型不正、`bool` の数値扱い、`NaN`、非正規形の IP・UUID、期限切れ、未来の `iat`、シンボリックリンク、FIFO、所有者不一致） |
+| apply の状態遷移 | 重複 `id` の無視、同一バッチの allow 優先、`invocation` 不一致・`iat <= last-allow`・期限切れの stop の破棄、部分成功時の終了コード |
+| idle の状態遷移 | 認証直後（`last-allow` 更新）に停止しないこと、stop 要求の 5 分後の再要求、人数回復時のリセット、InvocationID 変化時の初期化 |
+| poll から apply までの結合 | 正常な SQS メッセージ相当の JSON から要求ファイル生成・apply 適用までが通ること |
 | nft コマンド生成 | 生成されるトランザクション文字列の単体テスト（不正な IP が混入しないこと） |
 | SLP クライアント | ローカルのダミーサーバーで、正常応答・巨大応答・タイムアウト・不正 JSON を検証 |
 | Terraform | `terraform validate`・`terraform plan` の確認 |
