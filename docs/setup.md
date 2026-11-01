@@ -158,7 +158,7 @@ aws cognito-idp admin-create-user --user-pool-id <POOL_ID> --username <NAME> --t
 aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAME> --group-name minecraft
 ```
 
-- 一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させます（パスワードは 8 文字以上）。
+- 一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させます（パスワードは 8 文字以上で、英大文字・英小文字・数字・記号をそれぞれ 1 文字以上含む。一時パスワードも同じ条件）。
 - グループ `minecraft` に入っていないユーザーは、認証に成功しても拒否されます。
 - ユーザー名は大文字小文字を区別せず、`^[A-Za-z0-9._@+-]{1,128}$` に合うものだけを作成します。
 
