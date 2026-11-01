@@ -203,7 +203,7 @@ aws iam create-access-key --user-name craftlatch-host --query 'AccessKey.[Access
 date +%F | sudo tee /etc/craftlatch/aws-credentials.rotated
 ```
 
-書き込めたかを確認します（空のファイルを検出するため）。1 つ目はキーが 1 本増えていること、2 つ目は `1` が表示されることを確認します。
+書き込めたかを確認します（空のファイルを検出するため）。1 つ目は新しいキーが一覧にあること、2 つ目は `1` が表示されることを確認します。
 
 ```
 aws iam list-access-keys --user-name craftlatch-host

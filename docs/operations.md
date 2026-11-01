@@ -113,7 +113,7 @@ sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key
 `--preserve-env` が許可されていない環境では、設定ファイルの場所を明示して渡します。
 
 ```
-sudo env AWS_PROFILE=<PROFILE> AWS_CONFIG_FILE=$HOME/.aws/config AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials host/scripts/craftlatch-rotate-key
+sudo env HOME=$HOME AWS_PROFILE=<PROFILE> AWS_CONFIG_FILE=$HOME/.aws/config AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials host/scripts/craftlatch-rotate-key
 ```
 
 **本番サーバーで確認すること:** 実際にこの方法で管理者のプロファイルが `sudo` 下で使えるか（SSO を使う場合は、キャッシュが読まれてトークンが有効か）を、最初に `sudo --preserve-env=AWS_PROFILE,HOME aws sts get-caller-identity` で確認してからローテーションを実行してください。ローテーション後は、サーバー上の管理者用の一時認証情報を削除します。
@@ -169,8 +169,8 @@ cp <WORK>/nft_list_table.json host/lib/fwcheck-expected.json
 7. `git diff` で内容（MAC が `aa:bb:cc:dd:ee:ff`、ポート、許可期限）を確認する。`<WORK>` の一時ファイルを削除する。`queue_url` を含む写しは絶対にコミットしない。
 8. ブランチを作って雛形をコミットし、PR を作成して main にマージする（main は PR 経由のマージが必須です）。
 9. サーバー上のチェックアウトで `git pull` する。
-10. **ここで初めて**本番の設定を変更する。`sudoedit /etc/craftlatch/config.json` で、手順 3 と同じ変更を加える（本物のルーター MAC は変えない）。
-11. `sudo host/install.sh` を実行する。雛形と新しい nft ルールが配置され、更新時の案内が表示される（5 章）。`config.json` は上書きされない。
+10. **ここで初めて**本番の設定を変更する（手順 11 と続けて行う）。`sudoedit /etc/craftlatch/config.json` で、手順 3 と同じ変更を加える（本物のルーター MAC は変えない）。
+11. **手順 10 と 11 は続けて実行する**（間に時間を空けると、その間は fwcheck が新しい設定と古い雛形の不一致で失敗する）。`sudo host/install.sh` を実行する。雛形と新しい nft ルールが配置され、更新時の案内が表示される（5 章）。`config.json` は上書きされない。
 12. 案内どおりに `sudo systemctl restart craftlatch-firewall.service` を実行する（Minecraft の停止と許可リストの消去を伴う。プレイヤーがいない時間に行う）。
 
 ## 5. `install.sh` の更新時の案内
