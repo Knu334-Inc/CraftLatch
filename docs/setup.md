@@ -42,6 +42,8 @@ aws iam list-open-id-connect-providers
 
 リポジトリのルートで実行します（`cd` は使いません）。
 
+`infra/bootstrap` と `infra/terraform` は別の state（key）を使います。`TF_DATA_DIR` を設定する場合（CloudShell でホームの容量を節約する場合など）は、**ルートごとに別のパスにしてください**（例: `TF_DATA_DIR=/tmp/tfdata-bootstrap terraform -chdir=infra/bootstrap ...`）。同じパスを使うと、後から `init` したルートの backend 設定で上書きされ、もう一方のルートが別の state を読みます（bootstrap の plan に、アプリのリソースの削除が大量に出ます。その plan は apply しないでください）。
+
 ```
 terraform -chdir=infra/bootstrap init -backend-config="bucket=<BUCKET>" -backend-config="key=bootstrap/terraform.tfstate"
 terraform -chdir=infra/bootstrap plan -var="state_bucket=<BUCKET>"
