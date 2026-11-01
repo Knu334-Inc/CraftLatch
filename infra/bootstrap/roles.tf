@@ -381,6 +381,23 @@ data "aws_iam_policy_document" "apply_iam" {
     }
   }
 
+  # HTTP API のステージ作成時、API Gateway は呼び出し元の権限で API Gateway のサービスリンクロールの作成を試みる。
+  # ロールが既にあるアカウントでは、この呼び出しが拒否されてもステージは作成される（2026-11-01 に実機で確認）。
+  # ロールがないアカウント（一度も API Gateway を使っていない）での要否は未確認のため、別のアカウントでの構築に備えて許可する。
+  # 対象はこのロールだけで、ロールの権限は AWS が定義する。削除・変更は許可しない。
+  statement {
+    sid       = "IamCreateApiGatewayServiceLinkedRole"
+    effect    = "Allow"
+    actions   = ["iam:CreateServiceLinkedRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:AWSServiceName"
+      values   = ["ops.apigateway.amazonaws.com"]
+    }
+  }
+
   # Task 11 の data "aws_iam_policy" "boundary"（name 指定）の読み取り。書き込みは protected_deny で拒否する。
   statement {
     sid    = "IamReadBoundaryPolicy"
@@ -514,6 +531,29 @@ data "aws_iam_policy_document" "apply_app" {
     condition {
       test     = "StringEquals"
       variable = "aws:ResourceTag/Project"
+      values   = ["CraftLatch"]
+    }
+  }
+
+  # ステージはタグを付けられるリソースで、タグ付きの作成（default_tags）では CreateStage に加えて
+  # apigateway:TagResource が /apis/<ApiId>/stages に対して評価される（2026-11-01 に実機で確認）。
+  # aws:ResourceTag は親の API のタグで評価されるため、Project=CraftLatch の API への、Project=CraftLatch を付ける作成に限る。
+  # 既存のリソースへのタグの付け替え（/tags/<ARN>）は許可しない。
+  statement {
+    sid       = "ApiGatewayTagStagesOnCreate"
+    effect    = "Allow"
+    actions   = ["apigateway:TagResource"]
+    resources = ["arn:aws:apigateway:${var.region}::/apis/*/stages"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = ["CraftLatch"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
       values   = ["CraftLatch"]
     }
   }
