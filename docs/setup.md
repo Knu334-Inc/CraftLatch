@@ -58,16 +58,18 @@ terraform -chdir=infra/bootstrap output -raw plan_role_arn
 terraform -chdir=infra/bootstrap output -raw apply_role_arn
 ```
 
-### ロックファイルのコミット
+### ロックファイル
 
-CI は `terraform init -lockfile=readonly` を使うため、`.terraform.lock.hcl` が先にコミットされていないと CI が失敗します。開発機（Apple Silicon の Mac）と CI（Linux x86_64）の両方で使えるよう、両方のルートで、リポジトリのルートから次を実行します。
+`infra/bootstrap/.terraform.lock.hcl` と `infra/terraform/.terraform.lock.hcl` はリポジトリにコミット済みです（`linux_amd64`・`darwin_arm64`・`linux_arm64` のハッシュを含みます）。初回の構築では何もする必要はありません。
+
+CI は `terraform init -lockfile=readonly` を使うため、lock ファイルにないプロバイダーやハッシュがあると CI が失敗します。プロバイダーを更新する場合だけ、リポジトリのルートで次を実行します。
 
 ```
-terraform -chdir=infra/bootstrap providers lock -platform=linux_amd64 -platform=darwin_arm64
-terraform -chdir=infra/terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
+terraform -chdir=infra/bootstrap providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=linux_arm64
+terraform -chdir=infra/terraform providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=linux_arm64
 ```
 
-`infra/bootstrap/.terraform.lock.hcl` と `infra/terraform/.terraform.lock.hcl` を、**最初の PR の CI が走る前に**コミットします（最初の PR に含めて構いません）。プロバイダーの更新は、`terraform providers lock` をやり直す明示的な PR で行います。
+更新した lock ファイルは、プロバイダーの更新だけを目的とした PR でコミットします。
 
 ## ③ GitHub の設定
 
