@@ -36,7 +36,9 @@ aws iam list-open-id-connect-providers
 
 `oidc-provider/token.actions.githubusercontent.com` で終わる ARN があれば、下の `plan`・`apply` に `-var="existing_github_oidc_provider_arn=<その ARN>"` を付けます（bootstrap はそのプロバイダーを作成・変更・削除しません）。その場合、そのプロバイダーの Audience（`client_id_list`）に `sts.amazonaws.com` が含まれている必要があります（`aws iam get-open-id-connect-provider --open-id-connect-provider-arn <その ARN>` の `ClientIDList` で確認）。なければ bootstrap が作ります。
 
-ただし、`terraform -chdir=infra/bootstrap state list` に `aws_iam_openid_connect_provider.github[0]` が出る場合、そのプロバイダーは bootstrap 自身が作ったものなので、一覧に出ていてもその ARN を `existing_github_oidc_provider_arn` に渡してはいけません（渡すと削除が計画されます。`prevent_destroy` により plan で失敗します）。既存のプロバイダーを使う方式に意図して切り替える場合だけ、先に `terraform -chdir=infra/bootstrap state rm 'aws_iam_openid_connect_provider.github[0]'` を実行してから ARN を渡します。
+初めて bootstrap を実行する場合は、次の段落は読み飛ばしてかまいません（まだ `init` していないため、`state list` は「No state file was found!」になります）。
+
+2 回目以降（下の `init` 済み）で、`terraform -chdir=infra/bootstrap state list` に `aws_iam_openid_connect_provider.github[0]` が出る場合、そのプロバイダーは bootstrap 自身が作ったものなので、一覧に出ていてもその ARN を `existing_github_oidc_provider_arn` に渡してはいけません（渡すと削除が計画されます。`prevent_destroy` により plan で失敗します）。既存のプロバイダーを使う方式に意図して切り替える場合だけ、先に `terraform -chdir=infra/bootstrap state rm 'aws_iam_openid_connect_provider.github[0]'` を実行してから ARN を渡します。
 
 リポジトリのルートで実行します（`cd` は使いません）。
 
