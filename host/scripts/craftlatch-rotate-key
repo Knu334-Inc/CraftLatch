@@ -153,7 +153,7 @@ created=$("$AWS_CLI" iam create-access-key --user-name "$iam_user" \
     || die "失敗: 新しいキーの発行"
 read -r new_id new_secret <<<"$created"
 created=""
-[ -n "$new_id" ] && [ -n "$new_secret" ] || die "失敗: 新しいキーの発行結果を解釈できません"
+if [ -z "$new_id" ] || [ -z "$new_secret" ]; then die "失敗: 新しいキーの発行結果を解釈できません"; fi
 echo "新しいキーを発行しました: $new_id（旧キー: $old_id）"
 
 rm -f -- "$cred_new"
