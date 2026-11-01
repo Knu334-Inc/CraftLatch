@@ -20,9 +20,9 @@ resource "aws_cognito_user_pool" "this" {
 
   mfa_configuration = "OFF"
 
-  # MFA がないため長さで補う。文字種の条件は課さない。
+  # 最小 8 文字（利用者の負担を考慮した管理者の判断。MFA はないため、推測されにくいパスワードを利用者に求める）。文字種の条件は課さない。
   password_policy {
-    minimum_length                   = 14
+    minimum_length                   = 8
     require_lowercase                = false
     require_numbers                  = false
     require_symbols                  = false
