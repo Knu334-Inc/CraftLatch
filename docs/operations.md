@@ -251,7 +251,7 @@ sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 通常の変更は PR を作り、`terraform-plan` の結果（リソースの作成・変更・削除の件数）を確認して main にマージし、`production` の承認で apply します。
 
 - 公開ログに出るのは件数・コミット SHA・失敗したコマンド名と終了コードだけです。失敗の原因は、手元で同じコミットに対して `terraform plan` を実行して調べます（リポジトリのルートで `terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"` の後に `terraform -chdir=infra/terraform plan`）。
-- `infra/bootstrap`（OIDC プロバイダー・GHA ロール・Boundary・User Pool）は、管理者が手元で適用します（`setup.md` ②。既存の OIDC プロバイダーを使っている場合は毎回 `existing_github_oidc_provider_arn` を渡します）。変更の後は、`workflow_dispatch` で apply ワークフローを実行し、ロールを引き受けられて差分がないことを確認します。
+- `infra/bootstrap`（OIDC プロバイダー・GHA ロール・Boundary・User Pool）は、管理者が手元で適用します（`setup.md` ②。既存の OIDC プロバイダーを使っている場合は毎回 `existing_github_oidc_provider_arn` を渡します。復旧などで手順をやり直すとき、`terraform -chdir=infra/bootstrap state list` に `aws_iam_openid_connect_provider.github[0]` が出るなら、そのプロバイダーは bootstrap 自身のものなので ARN を渡さず、既存のプロバイダーを使う方式に意図して切り替える場合だけ先に `terraform -chdir=infra/bootstrap state rm 'aws_iam_openid_connect_provider.github[0]'` を実行します）。変更の後は、`workflow_dispatch` で apply ワークフローを実行し、ロールを引き受けられて差分がないことを確認します。
 - User Pool の設定（パスワードポリシーなど）の変更は、PR ではなく管理者が `infra/bootstrap/cognito.tf` を変更して bootstrap を適用します（apply ロールには User Pool 本体の変更権限がありません）。User Pool には削除保護が付いています。削除が必要な場合だけ、`deletion_protection` を `INACTIVE` にして bootstrap を適用してから削除します（ユーザーもすべて消えます）。
 - プロバイダーの更新は、`terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` を両方のルート（`infra/bootstrap`、`infra/terraform`）でやり直し、明示的な PR で行います。
 - `queue_url` などの出力は手元の `terraform -chdir=infra/terraform output -raw <名前>` で確認し、CI のログに出力しません。

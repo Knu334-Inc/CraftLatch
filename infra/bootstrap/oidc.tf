@@ -7,6 +7,15 @@ resource "aws_iam_openid_connect_provider" "github" {
 
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
+
+  # bootstrap が作ったプロバイダーは、後から他のシステムも共有している可能性がある（アカウントに 1 つしかないため）。
+  # その ARN を誤って existing_github_oidc_provider_arn に渡すと count が 1 から 0 になり削除が計画され、
+  # CraftLatch と他のシステムの GitHub Actions の認証が壊れる。変数の validation では過去の state を見られないため、
+  # 削除を plan の段階で失敗させる。既存のプロバイダーを使う方式に意図して切り替える場合は、先に
+  # terraform state rm 'aws_iam_openid_connect_provider.github[0]' で state から外す（docs/setup.md ②）。
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 locals {
