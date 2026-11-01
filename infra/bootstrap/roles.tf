@@ -405,67 +405,33 @@ data "aws_iam_policy_document" "apply_iam" {
 
 # アプリケーションのリソース（Cognito・API Gateway・Lambda・SQS・CloudWatch Logs）。
 # ARN に生成 ID を含むサービス（Cognito、API Gateway）はタグ Project=CraftLatch で、それ以外は名前で限定する。
+# アカウントは他のシステムと共有する前提で、名前の接頭辞 craftlatch- で絞る権限は、同じアカウントで
+# craftlatch- で始まる名前を他のシステムが使わないことを前提とする。
 data "aws_iam_policy_document" "apply_app" {
-  # CreateUserPool はリソース種別を持たない（ARN で限定できない）ため * とし、作成時のタグで限定する。
+  # User Pool 本体は bootstrap で管理者が作成・変更する（infra/bootstrap/cognito.tf）。apply ロールには Pool 本体の作成・変更・削除・
+  # タグ付けを許可しない。CreateUserPool は作成中の Pool に aws:ResourceTag がなく、依存アクションの TagResource を
+  # 「作成時のタグ付け」と「既存のタグのない Pool へのタグ付け」で区別できないため（他の Pool を管理下に入れられる）。
+  # 下の許可には含まれないが、許可を広げたときの多層防御としてすべての User Pool に対して明示的に拒否する。
   statement {
-    sid       = "CognitoCreateTaggedUserPool"
-    effect    = "Allow"
-    actions   = ["cognito-idp:CreateUserPool"]
-    resources = ["*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:RequestTag/Project"
-      values   = ["CraftLatch"]
-    }
-  }
-
-  # タグ付きで作成するときに必要な TagResource（CreateUserPool の依存アクション）。
-  # 作成前のリソースには aws:ResourceTag がないため、付けるタグで限定する。
-  # 残存リスク: 同じアカウントのタグのない User Pool には Project=CraftLatch を付けて管理下に入れられる。
-  # アカウントを CraftLatch 専用で使う前提で受容する。他の値のタグが付いた User Pool は下の
-  # CognitoDenyRetagOtherPools で拒否する。この文を削除できるかは U11（Task 14）で確認する。
-  statement {
-    sid       = "CognitoTagOnCreate"
-    effect    = "Allow"
-    actions   = ["cognito-idp:TagResource"]
-    resources = ["arn:aws:cognito-idp:${var.region}:${local.account_id}:userpool/*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:RequestTag/Project"
-      values   = ["CraftLatch"]
-    }
-  }
-
-  # Project タグが CraftLatch 以外の値で付いている User Pool のタグ変更を拒否する（他の User Pool の乗っ取り防止）。
-  statement {
-    sid    = "CognitoDenyRetagOtherPools"
+    sid    = "CognitoDenyUserPoolChanges"
     effect = "Deny"
     actions = [
+      "cognito-idp:AddCustomAttributes",
+      "cognito-idp:CreateUserPool",
+      "cognito-idp:DeleteUserPool",
+      "cognito-idp:SetUserPoolMfaConfig",
       "cognito-idp:TagResource",
       "cognito-idp:UntagResource",
+      "cognito-idp:UpdateUserPool",
     ]
     resources = ["*"]
-
-    condition {
-      test     = "Null"
-      variable = "aws:ResourceTag/Project"
-      values   = ["false"]
-    }
-
-    condition {
-      test     = "StringNotEquals"
-      variable = "aws:ResourceTag/Project"
-      values   = ["CraftLatch"]
-    }
   }
 
-  # 既存の User Pool とその配下（アプリクライアント・ドメイン・グループ・ブランディング）。
-  # これらのアクションの対象は User Pool の ARN で、User Pool のタグで判定される。
+  # 既存の User Pool の配下（アプリクライアント・ドメイン・グループ・ブランディング）の作成・更新・削除と読み取り。
+  # これらのアクションの対象は User Pool の ARN で、User Pool のタグで判定される（bootstrap が Project=CraftLatch を付ける）。
   # ListUserPoolClients は aws_cognito_managed_login_branding の読み取り（refresh のたび）で呼ばれる。
   statement {
-    sid    = "CognitoManageTaggedUserPools"
+    sid    = "CognitoManageTaggedUserPoolChildren"
     effect = "Allow"
     actions = [
       "cognito-idp:CreateGroup",
@@ -474,23 +440,15 @@ data "aws_iam_policy_document" "apply_app" {
       "cognito-idp:CreateUserPoolDomain",
       "cognito-idp:DeleteGroup",
       "cognito-idp:DeleteManagedLoginBranding",
-      "cognito-idp:DeleteUserPool",
       "cognito-idp:DeleteUserPoolClient",
       "cognito-idp:DeleteUserPoolDomain",
       "cognito-idp:DescribeManagedLoginBranding",
       "cognito-idp:DescribeManagedLoginBrandingByClient",
-      "cognito-idp:DescribeUserPool",
       "cognito-idp:DescribeUserPoolClient",
       "cognito-idp:GetGroup",
-      "cognito-idp:GetUserPoolMfaConfig",
-      "cognito-idp:ListTagsForResource",
       "cognito-idp:ListUserPoolClients",
-      "cognito-idp:SetUserPoolMfaConfig",
-      "cognito-idp:TagResource",
-      "cognito-idp:UntagResource",
       "cognito-idp:UpdateGroup",
       "cognito-idp:UpdateManagedLoginBranding",
-      "cognito-idp:UpdateUserPool",
       "cognito-idp:UpdateUserPoolClient",
       "cognito-idp:UpdateUserPoolDomain",
     ]
@@ -503,6 +461,15 @@ data "aws_iam_policy_document" "apply_app" {
     }
   }
 
+  # data "aws_cognito_user_pools" は ListUserPools の一覧から名前で検索する。ListUserPools はリソース種別を持たない
+  # （ARN で限定できない）ため * とする。User Pool の名前と ID の一覧のみで、ユーザーは読めない。
+  statement {
+    sid       = "CognitoListUserPools"
+    effect    = "Allow"
+    actions   = ["cognito-idp:ListUserPools"]
+    resources = ["*"]
+  }
+
   # DescribeUserPoolDomain はドメイン名だけを受け取り、リソース種別を持たないため * とする。読み取りのみ。
   statement {
     sid       = "CognitoDescribeDomain"
@@ -511,7 +478,7 @@ data "aws_iam_policy_document" "apply_app" {
     resources = ["*"]
   }
 
-  # HTTP API の作成（POST /apis）は作成時のタグで限定する。
+  # HTTP API の作成（POST /apis）は作成時のタグと API 名で限定する。
   statement {
     sid       = "ApiGatewayCreateTaggedApi"
     effect    = "Allow"
@@ -522,6 +489,12 @@ data "aws_iam_policy_document" "apply_app" {
       test     = "StringEquals"
       variable = "aws:RequestTag/Project"
       values   = ["CraftLatch"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "apigateway:Request/ApiName"
+      values   = ["craftlatch-api"]
     }
   }
 

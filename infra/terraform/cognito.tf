@@ -1,43 +1,26 @@
 # Cognito（設計書 4.1）。
 
-resource "aws_cognito_user_pool" "this" {
-  name           = "${var.project}-users"
-  user_pool_tier = "ESSENTIALS"
+# User Pool 本体は bootstrap（infra/bootstrap/cognito.tf）で管理者が作成・変更する。apply ロールには Pool 本体の
+# 作成・変更・削除を許可していないため、ここでは名前で参照し、配下のリソースだけを作る。
+# 同じ名前の Pool が 0 件または 2 件以上なら plan・apply を止める（別の Pool に配下を作らないため）。
+data "aws_cognito_user_pools" "this" {
+  name = "${var.project}-users"
 
-  # サインイン識別子はユーザー名（username_attributes・alias_attributes は指定しない）。
-  # ユーザー名の大文字小文字は区別しない（作成後は変更できず、変えると User Pool が作り直しになる）。
-  username_configuration {
-    case_sensitive = false
-  }
-
-  admin_create_user_config {
-    allow_admin_create_user_only = true
-  }
-
-  mfa_configuration = "OFF"
-
-  # MFA がないため長さで補う。文字種の条件は課さない。
-  password_policy {
-    minimum_length                   = 14
-    require_lowercase                = false
-    require_numbers                  = false
-    require_symbols                  = false
-    require_uppercase                = false
-    temporary_password_validity_days = 7
-  }
-
-  # 管理者によるリセットのみ（メール送信の設定が不要）。
-  account_recovery_setting {
-    recovery_mechanism {
-      name     = "admin_only"
-      priority = 1
+  lifecycle {
+    postcondition {
+      condition     = try(length(self.ids), 0) == 1
+      error_message = "User Pool craftlatch-users がちょうど 1 件ではありません（bootstrap の適用状況と同名の Pool を確認してください）。"
     }
   }
 }
 
+locals {
+  user_pool_id = one(data.aws_cognito_user_pools.this.ids)
+}
+
 resource "aws_cognito_user_group" "minecraft" {
   name         = "minecraft"
-  user_pool_id = aws_cognito_user_pool.this.id
+  user_pool_id = local.user_pool_id
 }
 
 # プレフィックスドメインは craftlatch-<8 桁の 16 進数>。CI から値を渡す経路を増やさないため random_id で生成する。
@@ -47,14 +30,14 @@ resource "random_id" "domain" {
 
 resource "aws_cognito_user_pool_domain" "this" {
   domain                = "${var.project}-${random_id.domain.hex}"
-  user_pool_id          = aws_cognito_user_pool.this.id
+  user_pool_id          = local.user_pool_id
   managed_login_version = 2
 }
 
 # パブリッククライアント（シークレットなし）+ PKCE。認可コードフローのみ、スコープは openid のみ。
 resource "aws_cognito_user_pool_client" "web" {
   name            = "${var.project}-web"
-  user_pool_id    = aws_cognito_user_pool.this.id
+  user_pool_id    = local.user_pool_id
   generate_secret = false
 
   allowed_oauth_flows_user_pool_client = true
@@ -83,7 +66,7 @@ resource "aws_cognito_user_pool_client" "web" {
 # Managed Login の利用に必要。既定のスタイルを使う。
 resource "aws_cognito_managed_login_branding" "web" {
   client_id    = aws_cognito_user_pool_client.web.id
-  user_pool_id = aws_cognito_user_pool.this.id
+  user_pool_id = local.user_pool_id
 
   use_cognito_provided_values = true
 }

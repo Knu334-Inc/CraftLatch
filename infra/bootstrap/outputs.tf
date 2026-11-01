@@ -13,3 +13,8 @@ output "boundary_policy_arn" {
   description = "Permissions Boundary craftlatch-boundary の ARN"
   value       = aws_iam_policy.boundary.arn
 }
+
+output "user_pool_id" {
+  description = "User Pool craftlatch-users の ID（ユーザー追加の手順で使う。CI では使わない）"
+  value       = aws_cognito_user_pool.this.id
+}

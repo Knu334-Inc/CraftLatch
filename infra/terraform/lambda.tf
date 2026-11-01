@@ -29,7 +29,7 @@ resource "aws_lambda_function" "auth" {
     variables = {
       COGNITO_DOMAIN = "${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com"
       CLIENT_ID      = aws_cognito_user_pool_client.web.id
-      ISSUER         = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.this.id}"
+      ISSUER         = "https://cognito-idp.${var.region}.amazonaws.com/${local.user_pool_id}"
       REDIRECT_URI   = "${aws_apigatewayv2_api.this.api_endpoint}/callback"
       QUEUE_URL      = aws_sqs_queue.grants.url
       ALLOWED_GROUP  = aws_cognito_user_group.minecraft.name
