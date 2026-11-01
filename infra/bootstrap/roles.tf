@@ -52,7 +52,7 @@ data "aws_iam_policy_document" "protected_deny" {
     resources = [
       "arn:aws:iam::${local.account_id}:role/craftlatch-gha-*",
       aws_iam_policy.boundary.arn,
-      aws_iam_openid_connect_provider.github.arn,
+      local.github_oidc_provider_arn,
     ]
   }
 }
