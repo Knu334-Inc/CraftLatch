@@ -49,7 +49,7 @@ terraform -chdir=infra/bootstrap apply -var="state_bucket=<BUCKET>"
 ```
 
 - `state_bucket` は必須の変数です。アカウント ID を含むため、`-var` で渡すか、コミットされない `terraform.tfvars`（`*.tfvars` は `.gitignore` 済み）に書きます。
-- `github_repository` の既定値は `Knu334-Inc/CraftLatch` です。別のリポジトリで使う場合は `-var="github_repository=<OWNER>/<NAME>"` を付けます。
+- `github_oidc_subject_prefix` の既定値は、このリポジトリの OIDC の `sub` の接頭辞（オーナーとリポジトリの数値 ID 付きの immutable subject）です。GitHub は新しいリポジトリでこの形式を使います。別のリポジトリで使う場合は、`gh api repos/<OWNER>/<NAME>/actions/oidc/customization/sub` の `sub_claim_prefix` を確認し、`-var="github_oidc_subject_prefix=<その値>"` を付けます（`use_immutable_subject` が `true` であること）。
 - `existing_github_oidc_provider_arn` を使う場合も、`-var` で渡すか `terraform.tfvars` に書きます（アカウント ID を含むためコミットしません）。以降の bootstrap の `plan`・`apply` でも毎回同じ値を渡します（渡し忘れると bootstrap がプロバイダーを作ろうとして失敗します）。`plan -out=<ファイル>` で保存した計画を `apply <ファイル>` で適用する場合は、値は計画に含まれるため `apply` には `-var` を付けません。
 - apply 後、次の出力を控えます（③の Secret に設定します）。
 

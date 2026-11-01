@@ -405,10 +405,10 @@ AWS のアクセスキーは GitHub に置かない。ワークフローごと�
 
 | IAM ロール | 用途 | 信頼ポリシーの条件（プロバイダー `token.actions.githubusercontent.com`、いずれも `StringEquals` の完全一致） | 権限 |
 |---|---|---|---|
-| `craftlatch-gha-plan` | PR での plan | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc/CraftLatch:pull_request` | 下記「plan ロールの権限」 |
-| `craftlatch-gha-apply` | main での apply | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc/CraftLatch:environment:production` | 下記「apply ロールの権限」 |
+| `craftlatch-gha-plan` | PR での plan | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc@272232200/CraftLatch@1441016403:pull_request` | 下記「plan ロールの権限」 |
+| `craftlatch-gha-apply` | main での apply | `aud = sts.amazonaws.com`、`sub = repo:Knu334-Inc@272232200/CraftLatch@1441016403:environment:production` | 下記「apply ロールの権限」 |
 
-apply の `sub` 自体には main ブランチの条件が含まれない。main への限定は GitHub Environment `production` の設定（許可ブランチ）で成立するため、その設定を `docs/setup.md` の検証項目にする（後述）。plan の `sub` は特定のワークフローファイルを識別しないため、plan ロールは読み取り専用に限る。
+`sub` は GitHub の immutable subject（オーナーとリポジトリの数値 ID 付き）の形式で、リポジトリの作り直しや名前の再利用では一致しない（接頭辞は bootstrap の変数 `github_oidc_subject_prefix`）。apply の `sub` 自体には main ブランチの条件が含まれない。main への限定は GitHub Environment `production` の設定（許可ブランチ）で成立するため、その設定を `docs/setup.md` の検証項目にする（後述）。plan の `sub` は特定のワークフローファイルを識別しないため、plan ロールは読み取り専用に限る。
 
 **state バケットの権限（plan・apply 共通の境界）**
 

@@ -4,10 +4,18 @@ variable "region" {
   default     = "ap-northeast-1"
 }
 
-variable "github_repository" {
-  description = "OIDC の sub に使う GitHub リポジトリ（owner/name）"
+# GitHub の OIDC トークンの sub の接頭辞。このリポジトリは immutable subject（オーナーとリポジトリの数値 ID 付き）を使う。
+# 確認: gh api repos/<OWNER>/<NAME>/actions/oidc/customization/sub の sub_claim_prefix。
+# ID を含むため、リポジトリを作り直したり同じ名前が別の所有者に取られたりしても一致しない。
+variable "github_oidc_subject_prefix" {
+  description = "OIDC の sub の接頭辞（repo:OWNER@OWNER_ID/NAME@REPO_ID）"
   type        = string
-  default     = "Knu334-Inc/CraftLatch"
+  default     = "repo:Knu334-Inc@272232200/CraftLatch@1441016403"
+
+  validation {
+    condition     = can(regex("^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+$", var.github_oidc_subject_prefix))
+    error_message = "repo:OWNER@OWNER_ID/NAME@REPO_ID の形式（immutable subject）で指定してください。"
+  }
 }
 
 variable "state_bucket" {

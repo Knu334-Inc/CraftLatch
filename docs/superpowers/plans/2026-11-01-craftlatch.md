@@ -612,12 +612,12 @@ Terraform はコンテナ内に無く、レジストリへの通信もコンテ�
 ### Task 10: `infra/bootstrap`
 
 **Files:**
-- Create: `infra/bootstrap/versions.tf`、`backend.tf`（部分設定、`key` は init 時に `bootstrap/terraform.tfstate`）、`variables.tf`（`region`、`github_repository = "Knu334-Inc/CraftLatch"`、`existing_github_oidc_provider_arn`（既定 `""`。既存の OIDC プロバイダーを使う場合に ARN を渡す））、`oidc.tf`、`roles.tf`、`boundary.tf`、`cognito.tf`（User Pool `craftlatch-users`。設計書 4.1 の設定と削除保護）、`outputs.tf`（ロール ARN と `user_pool_id`。sensitive にはしないが CI では使わない）
+- Create: `infra/bootstrap/versions.tf`、`backend.tf`（部分設定、`key` は init 時に `bootstrap/terraform.tfstate`）、`variables.tf`（`region`、`github_oidc_subject_prefix = "repo:Knu334-Inc@272232200/CraftLatch@1441016403"`（immutable subject の接頭辞）、`existing_github_oidc_provider_arn`（既定 `""`。既存の OIDC プロバイダーを使う場合に ARN を渡す））、`oidc.tf`、`roles.tf`、`boundary.tf`、`cognito.tf`（User Pool `craftlatch-users`。設計書 4.1 の設定と削除保護）、`outputs.tf`（ロール ARN と `user_pool_id`。sensitive にはしないが CI では使わない）
 
 **Interfaces:**
 - Produces: IAM ロール `craftlatch-gha-plan`・`craftlatch-gha-apply`、ポリシー `craftlatch-boundary`（Task 11 の `permissions_boundary` に ARN を渡す。Task 11 では `data "aws_iam_policy" "boundary" { name = "craftlatch-boundary" }` で参照）、User Pool `craftlatch-users`（タグ `Project=CraftLatch`。Task 11 では `data "aws_cognito_user_pools"` で名前から参照）
 
-- [ ] **Step 1: OIDC プロバイダーと信頼ポリシーを書く** — `token.actions.githubusercontent.com`、条件は `StringEquals` で `aud = sts.amazonaws.com`、plan は `sub = repo:Knu334-Inc/CraftLatch:pull_request`、apply は `sub = repo:Knu334-Inc/CraftLatch:environment:production`。
+- [ ] **Step 1: OIDC プロバイダーと信頼ポリシーを書く** — `token.actions.githubusercontent.com`、条件は `StringEquals` で `aud = sts.amazonaws.com`、plan は `sub = <接頭辞>:pull_request`、apply は `sub = <接頭辞>:environment:production`。
 
 - [ ] **Step 2: state バケット権限を書く** — 設計書 4.7「state バケットの権限」: オブジェクトは `craftlatch/terraform.tfstate` と `.tflock` のみ、`ListBucket` は `StringLike s3:prefix = craftlatch/*`、`bootstrap/` とバケット設定変更は不許可。バケット名は変数 `state_bucket`（`terraform.tfvars` はコミットしない。`.gitignore` に `*.tfvars` を追加）。
 
