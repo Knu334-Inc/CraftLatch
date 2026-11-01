@@ -77,12 +77,12 @@ terraform -chdir=infra/terraform providers lock -platform=linux_amd64 -platform=
 
 | 名前 | 種類 | 値 |
 |---|---|---|
-| `AWS_PLAN_ROLE_ARN` | Secret | ②で控えた `plan_role_arn` |
-| `AWS_APPLY_ROLE_ARN` | Secret | ②で控えた `apply_role_arn` |
-| `TF_STATE_BUCKET` | Secret | `<BUCKET>` |
-| `AWS_REGION` | Variable | `ap-northeast-1` |
+| `AWS_PLAN_ROLE_ARN` | Repository secret | ②で控えた `plan_role_arn` |
+| `AWS_APPLY_ROLE_ARN` | Environment secret（`production`） | ②で控えた `apply_role_arn` |
+| `TF_STATE_BUCKET` | Repository secret | `<BUCKET>` |
+| `AWS_REGION` | Repository variable | `ap-northeast-1` |
 
-`production` Environment を使うジョブがあるため、Secret はリポジトリ単位で設定して構いません。
+PR の `plan` ジョブは Environment を使わないため、`AWS_PLAN_ROLE_ARN`・`TF_STATE_BUCKET`・`AWS_REGION` はリポジトリ単位で設定します（Environment に置くと `plan` から読めません）。`AWS_APPLY_ROLE_ARN` は `apply` ジョブ（`environment: production`）だけが使うため、下の Environment `production` を作成してから、その Environment の Secret に設定します（リポジトリ単位でも動作しますが、承認されたジョブだけが読めるようにします。apply ロール自体は信頼ポリシーで `environment:production` に限られています）。
 
 ### Environment `production`
 
