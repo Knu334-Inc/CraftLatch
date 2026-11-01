@@ -26,7 +26,7 @@
 
 `<POOL_ID>` はリポジトリのルートで `terraform -chdir=infra/bootstrap init -backend-config="bucket=<BUCKET>" -backend-config="key=bootstrap/terraform.tfstate"` の後に `terraform -chdir=infra/bootstrap output -raw user_pool_id` を実行して取得します。
 
-追加（一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させます。14 文字以上）:
+追加（一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させます。8 文字以上で、英大文字・英小文字・数字・記号をそれぞれ 1 文字以上含む）:
 
 ```
 aws cognito-idp admin-create-user --user-pool-id <POOL_ID> --username <NAME> --temporary-password '<TEMP_PASSWORD>' --message-action SUPPRESS

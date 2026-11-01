@@ -20,13 +20,13 @@ resource "aws_cognito_user_pool" "this" {
 
   mfa_configuration = "OFF"
 
-  # MFA がないため長さで補う。文字種の条件は課さない。
+  # 最小 8 文字で、英大文字・英小文字・数字・記号をそれぞれ 1 文字以上含む（利用者の負担を考慮した管理者の判断。MFA はないため、推測されにくいパスワードを利用者に求める）。
   password_policy {
-    minimum_length                   = 14
-    require_lowercase                = false
-    require_numbers                  = false
-    require_symbols                  = false
-    require_uppercase                = false
+    minimum_length                   = 8
+    require_lowercase                = true
+    require_numbers                  = true
+    require_symbols                  = true
+    require_uppercase                = true
     temporary_password_validity_days = 7
   }
 
