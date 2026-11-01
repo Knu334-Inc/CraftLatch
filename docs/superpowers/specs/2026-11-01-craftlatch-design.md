@@ -429,12 +429,13 @@ AWS のアクセスキーは GitHub に置かない。ワークフローごと�
 | ロール・ユーザーの作成 | `iam:CreateRole`、`iam:CreateUser` | 対象は `role/craftlatch-auth-role` と `user/craftlatch-host` の正確な ARN のみ。条件 `iam:PermissionsBoundary` が `craftlatch-boundary` の ARN と一致すること |
 | 権限の付与・更新・削除 | `iam:PutRolePolicy`、`iam:DeleteRolePolicy`、`iam:PutUserPolicy`、`iam:DeleteUserPolicy`、`iam:TagRole`、`iam:TagUser`、`iam:UpdateAssumeRolePolicy`、`iam:DeleteRole`、`iam:DeleteUser`、読み取り系 | 対象は上記 2 つの正確な ARN のみ。インラインポリシーのみ使い、`iam:AttachRolePolicy`・`iam:AttachUserPolicy` は許可しない |
 | ロールの受け渡し | `iam:PassRole` | 対象は `role/craftlatch-auth-role` の ARN のみ。条件 `iam:PassedToService = lambda.amazonaws.com` |
-| サービスリンクロールの作成 | `iam:CreateServiceLinkedRole` | 対象は `role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway` のみ。条件 `iam:AWSServiceName = ops.apigateway.amazonaws.com`（API Gateway を一度も使っていないアカウントでは、ステージの作成時に API Gateway が呼び出し元の権限で作る。削除・変更は許可しない） |
+| サービスリンクロールの作成 | `iam:CreateServiceLinkedRole` | 対象は `role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway` のみ。条件 `iam:AWSServiceName = ops.apigateway.amazonaws.com`（ステージの作成時に API Gateway が呼び出し元の権限で作成を試みる。ロールが既にあれば拒否されても作成は続くが、ロールがないアカウントでの要否は未確認のため許可する。削除・変更は許可しない） |
 | 明示的な拒否 | `iam:DeleteRolePermissionsBoundary`、`iam:DeleteUserPermissionsBoundary`、`iam:PutRolePermissionsBoundary`、`iam:PutUserPermissionsBoundary` | すべてのリソース（Boundary の削除・付け替えを禁止） |
 | 明示的な拒否 | IAM の全書き込みアクション（`iam:Create*`・`iam:Put*`・`iam:Update*`・`iam:Delete*`・`iam:Attach*`・`iam:Detach*`・`iam:SetDefaultPolicyVersion`・`iam:Tag*`・`iam:Untag*` 等） | `role/craftlatch-gha-*`、`policy/craftlatch-boundary`、OIDC プロバイダー（GHA 用ロール・Boundary・ポリシーバージョンの変更を禁止。既存の共有プロバイダーを使う場合はそれも守る） |
 | Cognito | User Pool 配下（グループ・ドメイン・アプリクライアント・Managed Login ブランディング）の作成・更新・削除と読み取り。`cognito-idp:ListUserPools`・`DescribeUserPoolDomain`（リソース種別がないため `*`） | `userpool/*` を条件 `aws:ResourceTag/Project = CraftLatch` で限定（配下のアクションは User Pool の ARN・タグで判定される） |
 | 明示的な拒否 | User Pool 本体の作成・変更・削除・タグ付け（`cognito-idp:CreateUserPool`・`UpdateUserPool`・`DeleteUserPool`・`TagResource`・`UntagResource`・`SetUserPoolMfaConfig`・`AddCustomAttributes`） | すべてのリソース（User Pool 本体は bootstrap で管理者が扱う。4.1） |
 | アプリケーションのリソース | API Gateway・Lambda・SQS・CloudWatch Logs の作成・変更・削除 | 名前またはタグ `Project=CraftLatch` で `craftlatch-*` のリソースに限定（サービスごとに ARN・条件の書き方が異なるため、具体的なポリシーは実装時に U11 で検証する） |
+| API Gateway のステージのタグ付き作成 | `apigateway:TagResource` | 対象は `/apis/*/stages` のみ。条件 `aws:ResourceTag/Project = CraftLatch`（親の API のタグで評価される）と `aws:RequestTag/Project = CraftLatch`。タグ付きの CreateStage で評価される。既存のリソースへのタグの付け替え（`/tags/*` への書き込み）は許可しない |
 | その他 | 上記の state バケットの権限 | — |
 
 AWS アカウントは他のシステムと共有する前提とする。名前の接頭辞 `craftlatch-` で絞る権限（plan・apply・Boundary）は、同じアカウントで `craftlatch-` で始まる名前を他のシステムが使わないことを前提とする。
