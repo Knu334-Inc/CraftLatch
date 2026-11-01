@@ -381,6 +381,22 @@ data "aws_iam_policy_document" "apply_iam" {
     }
   }
 
+  # HTTP API のステージ作成時、アカウントに API Gateway のサービスリンクロールがなければ API Gateway が呼び出し元の権限で作る。
+  # 一度も API Gateway を使っていないアカウントでは初回の apply で必要になる（既にあれば呼ばれない）。
+  # 対象はこのロールだけで、ロールの権限は AWS が定義する。削除・変更は許可しない。
+  statement {
+    sid       = "IamCreateApiGatewayServiceLinkedRole"
+    effect    = "Allow"
+    actions   = ["iam:CreateServiceLinkedRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:AWSServiceName"
+      values   = ["ops.apigateway.amazonaws.com"]
+    }
+  }
+
   # Task 11 の data "aws_iam_policy" "boundary"（name 指定）の読み取り。書き込みは protected_deny で拒否する。
   statement {
     sid    = "IamReadBoundaryPolicy"
