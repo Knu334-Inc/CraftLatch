@@ -7,7 +7,7 @@ CraftLatch を最初から構築する手順書です。上から順に実行し
 ## 前提と注意
 
 - 手元の PC に AWS CLI と Terraform（1.10 以上。CI は 1.17.1 を使用）があり、管理者用の AWS 認証情報（`AWS_PROFILE` 等）で操作できること。
-- **この AWS アカウントは CraftLatch 専用であることを前提とします。** apply 用ロール（`craftlatch-gha-apply`）の権限は名前またはタグ `Project=CraftLatch` で絞っていますが、サービスによっては絞り込みが完全ではありません。同じアカウントに他の用途のリソースがあると、タグのない Cognito ユーザープールなどを apply ロールが操作できる残存リスクがあります。他の用途と共用しないでください。
+- AWS アカウントは他のシステムと共有していて構いません。GitHub Actions 用ロール（`craftlatch-gha-plan`・`craftlatch-gha-apply`）の権限は、名前の接頭辞 `craftlatch-` またはタグ `Project=CraftLatch` で CraftLatch のリソースに絞っています。**同じアカウントで `craftlatch-` で始まる名前のリソース（Lambda・IAM・SQS・ロググループ・User Pool `craftlatch-users` 等）を他のシステムが使っていないこと**を確認してください。Cognito の User Pool 本体は apply ロールでは作れないため、②の bootstrap で作ります。
 - Cognito のユーザー名は大文字小文字を区別しません（作成後は変更できません）。ユーザー名は正規表現 `^[A-Za-z0-9._@+-]{1,128}$` に合うものだけを作成してください。合わない名前は Cognito では作れても、Lambda とホスト側が拒否し、完了ページが出ないか許可されません。
 - Ubuntu サーバーの前提: systemd 248 以上、`/media/ssd/paper` に Paper がある、ネットワークインターフェース `enp3s0`（LAN）と `wg0`（WireGuard）がある。
 - 「未検証事項」と書いた項目は、実機で初めて確認する事項です。結果を記録し、対処は Task 14 で決めます。
@@ -24,9 +24,17 @@ aws s3api put-public-access-block --bucket craftlatch-tfstate-<ACCOUNT_ID> --pub
 
 以降、バケット名を `<BUCKET>`（`craftlatch-tfstate-<ACCOUNT_ID>`）と書きます。暗号化は新規バケットの既定（SSE-S3）です。
 
-## ② bootstrap（OIDC プロバイダー・GitHub Actions 用ロール・Boundary）
+## ② bootstrap（OIDC プロバイダー・GitHub Actions 用ロール・Boundary・User Pool）
 
-`infra/bootstrap` は GitHub Actions が動く前に必要で、通常の apply ロールからは変更できないため、管理者が手元から実行します。
+`infra/bootstrap` は GitHub Actions が動く前に必要で、通常の apply ロールからは変更できないため、管理者が手元から実行します。Cognito の User Pool `craftlatch-users`（削除保護付き）もここで作ります。
+
+GitHub の OIDC プロバイダー（`token.actions.githubusercontent.com`）はアカウントに 1 つしか作れません。先に、他のシステムが既に作っていないか確認します。
+
+```
+aws iam list-open-id-connect-providers
+```
+
+`oidc-provider/token.actions.githubusercontent.com` で終わる ARN があれば、下の `plan`・`apply` に `-var="existing_github_oidc_provider_arn=<その ARN>"` を付けます（bootstrap はそのプロバイダーを作成・変更・削除しません）。その場合、そのプロバイダーの Audience（`client_id_list`）に `sts.amazonaws.com` が含まれている必要があります（`aws iam get-open-id-connect-provider --open-id-connect-provider-arn <その ARN>` の `ClientIDList` で確認）。なければ bootstrap が作ります。
 
 リポジトリのルートで実行します（`cd` は使いません）。
 
@@ -38,6 +46,7 @@ terraform -chdir=infra/bootstrap apply -var="state_bucket=<BUCKET>"
 
 - `state_bucket` は必須の変数です。アカウント ID を含むため、`-var` で渡すか、コミットされない `terraform.tfvars`（`*.tfvars` は `.gitignore` 済み）に書きます。
 - `github_repository` の既定値は `Knu334-Inc/CraftLatch` です。別のリポジトリで使う場合は `-var="github_repository=<OWNER>/<NAME>"` を付けます。
+- `existing_github_oidc_provider_arn` を使う場合も、`-var` で渡すか `terraform.tfvars` に書きます（アカウント ID を含むためコミットしません）。以降の bootstrap の `plan`・`apply` でも毎回同じ値を渡します（渡し忘れると bootstrap がプロバイダーを作ろうとして失敗します）。
 - apply 後、次の出力を控えます（③の Secret に設定します）。
 
 ```
@@ -118,6 +127,7 @@ apply ロールと plan ロールに必要な IAM アクションの最小集合
 
 - **state がまだ存在しない最初の `terraform plan`（PR）と最初の apply が、S3 の 404（NoSuchKey）ではなく 403 で失敗する可能性があります。** `s3:ListBucket` の許可を `s3:prefix` の条件（`craftlatch/*`）で絞っているため、state オブジェクトが存在しないときに S3 が存在を隠して 403 を返す場合があります。S3 backend の `init` がワークスペース一覧の取得で別の prefix を要求して失敗する可能性も同じ条件に関係します。
 - 失敗した場合は、**ジョブの失敗箇所（コマンド名と終了コード）を記録し、対処（IAM ポリシーの修正など）は Task 14 で決めます。** 手順書の回避策はまだありません。これは未検証事項です。
+- plan ロールの読み取りは CraftLatch のリソースに限定し、プロバイダーが呼ぶ読み取り API だけを許可しています。プロバイダーが想定外の API を呼ぶと、PR の plan が 403 で失敗する可能性があります（記録して Task 14 で対処を決めます）。
 - `iam:PermissionsBoundary` 条件で権限昇格を防げること、`archive_file` が同じ内容から同じ ZIP を作ること（変わると、コード未変更でも plan に Lambda の更新が出続けますが、デプロイの正しさには影響しません）も、初回の plan・apply で確認します。
 
 ### `queue_url` を取得する（手元でのみ）
@@ -129,11 +139,11 @@ terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"
 terraform -chdir=infra/terraform output -raw queue_url
 ```
 
-値は⑥で `/etc/craftlatch/config.json` に入力します。シェルの履歴やチャットに貼らないでください。ログイン URL と User Pool ID も同じ方法で取得できます（`terraform -chdir=infra/terraform output -raw login_url`、`terraform -chdir=infra/terraform output -raw user_pool_id`）。ログイン URL は利用者に直接共有します（リポジトリには書きません）。
+値は⑥で `/etc/craftlatch/config.json` に入力します。シェルの履歴やチャットに貼らないでください。ログイン URL も同じ方法で取得できます（`terraform -chdir=infra/terraform output -raw login_url`）。ログイン URL は利用者に直接共有します（リポジトリには書きません）。
 
 ## ⑤ Cognito ユーザーの作成
 
-`<POOL_ID>` は、リポジトリのルートで `terraform -chdir=infra/terraform output -raw user_pool_id` を実行して取得します。
+`<POOL_ID>` は、リポジトリのルートで `terraform -chdir=infra/bootstrap output -raw user_pool_id` を実行して取得します（②の `-backend-config` 付きの `init` で初期化済みであること）。
 
 ```
 aws cognito-idp admin-create-user --user-pool-id <POOL_ID> --username <NAME> --temporary-password '<TEMP_PASSWORD>' --message-action SUPPRESS

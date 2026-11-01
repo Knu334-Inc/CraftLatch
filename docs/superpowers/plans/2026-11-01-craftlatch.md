@@ -51,7 +51,7 @@
 | `host/tmpfiles.d/craftlatch.conf`、`host/config.json.example` | tmpfiles 定義、設定の雛形 |
 | `host/install.sh`、`host/scripts/craftlatch-rotate-key` | 配置・事前検証・更新案内、キーローテーション |
 | `src/lambda/craftlatch_auth/{handler,oidc,cookies,pages,settings}.py` | Lambda（ルーティング、OIDC、Cookie、HTML、環境変数） |
-| `infra/bootstrap/*.tf` | OIDC プロバイダー、GHA ロール 2 つ、Permissions Boundary |
+| `infra/bootstrap/*.tf` | OIDC プロバイダー、GHA ロール 2 つ、Permissions Boundary、User Pool |
 | `infra/terraform/*.tf` | Cognito、API、Lambda、SQS、IAM |
 | `.github/workflows/{ci,terraform-plan,terraform-apply}.yml`、`.github/scripts/tf-summary.sh` | CI、plan、apply、plan 要約 |
 | `tests/host/*`、`tests/lambda/*` | 単体テスト |
@@ -612,10 +612,10 @@ Terraform はコンテナ内に無く、レジストリへの通信もコンテ�
 ### Task 10: `infra/bootstrap`
 
 **Files:**
-- Create: `infra/bootstrap/versions.tf`、`backend.tf`（部分設定、`key` は init 時に `bootstrap/terraform.tfstate`）、`variables.tf`（`region`、`github_repository = "Knu334-Inc/CraftLatch"`）、`oidc.tf`、`roles.tf`、`boundary.tf`、`outputs.tf`（ロール ARN。sensitive にはしないが CI では使わない）
+- Create: `infra/bootstrap/versions.tf`、`backend.tf`（部分設定、`key` は init 時に `bootstrap/terraform.tfstate`）、`variables.tf`（`region`、`github_repository = "Knu334-Inc/CraftLatch"`、`existing_github_oidc_provider_arn`（既定 `""`。既存の OIDC プロバイダーを使う場合に ARN を渡す））、`oidc.tf`、`roles.tf`、`boundary.tf`、`cognito.tf`（User Pool `craftlatch-users`。設計書 4.1 の設定と削除保護）、`outputs.tf`（ロール ARN と `user_pool_id`。sensitive にはしないが CI では使わない）
 
 **Interfaces:**
-- Produces: IAM ロール `craftlatch-gha-plan`・`craftlatch-gha-apply`、ポリシー `craftlatch-boundary`（Task 11 の `permissions_boundary` に ARN を渡す。Task 11 では `data "aws_iam_policy" "boundary" { name = "craftlatch-boundary" }` で参照）
+- Produces: IAM ロール `craftlatch-gha-plan`・`craftlatch-gha-apply`、ポリシー `craftlatch-boundary`（Task 11 の `permissions_boundary` に ARN を渡す。Task 11 では `data "aws_iam_policy" "boundary" { name = "craftlatch-boundary" }` で参照）、User Pool `craftlatch-users`（タグ `Project=CraftLatch`。Task 11 では `data "aws_cognito_user_pools"` で名前から参照）
 
 - [ ] **Step 1: OIDC プロバイダーと信頼ポリシーを書く** — `token.actions.githubusercontent.com`、条件は `StringEquals` で `aud = sts.amazonaws.com`、plan は `sub = repo:Knu334-Inc/CraftLatch:pull_request`、apply は `sub = repo:Knu334-Inc/CraftLatch:environment:production`。
 
@@ -633,15 +633,15 @@ git commit -m "feat(infra): GitHub OIDC と GHA 用ロール・Boundary の boot
 ### Task 11: `infra/terraform`（アプリケーション本体）
 
 **Files:**
-- Create: `infra/terraform/versions.tf`、`backend.tf`（部分設定、`key = "craftlatch/terraform.tfstate"`、`use_lockfile = true`）、`variables.tf`（`region`、`project`。いずれも既定値あり。CI から入力する変数は無い）、`cognito.tf`（ドメインのプレフィックスは `random_id`（`hashicorp/random`、`byte_length = 4`）で生成した `craftlatch-<hex>`。設計書 4.6 の変数 `cognito_domain_prefix` は、CI から値を渡す経路を増やさないためこの方式に置き換える）、`api.tf`、`lambda.tf`、`sqs.tf`、`iam.tf`、`outputs.tf`
+- Create: `infra/terraform/versions.tf`、`backend.tf`（部分設定、`key = "craftlatch/terraform.tfstate"`、`use_lockfile = true`）、`variables.tf`（`region`、`project`。いずれも既定値あり。CI から入力する変数は無い）、`cognito.tf`（User Pool は作らず、Task 10 の `craftlatch-users` を `data "aws_cognito_user_pools"` で参照し、ちょうど 1 件でなければ停止する。ドメインのプレフィックスは `random_id`（`hashicorp/random`、`byte_length = 4`）で生成した `craftlatch-<hex>`。設計書 4.6 の変数 `cognito_domain_prefix` は、CI から値を渡す経路を増やさないためこの方式に置き換える）、`api.tf`、`lambda.tf`、`sqs.tf`、`iam.tf`、`outputs.tf`
 
 **Interfaces:**
 - Consumes: Task 9 の `src/lambda/craftlatch_auth/`（`archive_file` は `source_dir = "${path.module}/../../src/lambda"`・`excludes` に `__pycache__` と `*.pyc` を指定し、ZIP 内に `craftlatch_auth/` ディレクトリを保つ。ハンドラー `craftlatch_auth.handler.lambda_handler`。Task 9 の `test_zip_layout_importable` と同じ規則）、Task 10 の Boundary 名
-- Produces: 出力 `login_url`・`user_pool_id`・`queue_url`・`host_user_arn`（ログに出さないため CI では参照しない）
+- Produces: 出力 `login_url`・`queue_url`・`host_user_arn`（ログに出さないため CI では参照しない。`user_pool_id` は Task 10 の出力）
 
 - [ ] **Step 1: `sqs.tf` と `iam.tf` を書く** — 設計書 4.4（Standard、保持 600、可視性 60、SSE-SQS、DLQ なし、TLS 以外拒否のキューポリシー）・4.5（Lambda ロールと `craftlatch-host` ユーザー、インラインポリシー、`permissions_boundary`。アクセスキーは作らない）。
 
-- [ ] **Step 2: `cognito.tf` を書く** — 設計書 4.1 の表（Essentials、管理者のみ作成、MFA OFF、最小 14 文字、管理者リセットのみ、存在エラー秘匿、グループ `minecraft`、プレフィックスドメイン、Managed Login ブランディング既定）と、アプリクライアント（シークレットなし、`code` のみ、`openid`、コールバック 1 件、ID/アクセス 5 分、リフレッシュ 60 分）。
+- [ ] **Step 2: `cognito.tf` を書く** — 設計書 4.1 の表（User Pool 本体は Task 10 で作成済みのものを名前で参照、存在エラー秘匿、グループ `minecraft`、プレフィックスドメイン、Managed Login ブランディング既定）と、アプリクライアント（シークレットなし、`code` のみ、`openid`、コールバック 1 件、ID/アクセス 5 分、リフレッシュ 60 分）。
 
 - [ ] **Step 3: `lambda.tf` と `api.tf` を書く** — Lambda（Python 3.13、arm64、128MB、10 秒、環境変数は設計書 4.3 の表、ロググループ保持 30 日）、HTTP API（IPv4、`GET /login`・`GET /callback` のみ、ペイロード 2.0、`$default` ステージ自動デプロイ、burst 5・rate 1）、Lambda の実行許可。アカウント ID は `data "aws_caller_identity"`。
 
@@ -736,8 +736,22 @@ Expected: `completed success`。サマリーに作成リソースの一覧があ
 | `iam:PassRole` | `role/craftlatch-gha-apply` | denied |
 | `s3:GetObject`・`s3:PutObject` | `<バケット>/bootstrap/terraform.tfstate` | denied |
 | `s3:PutBucketPolicy` | `<バケット>` | denied |
+| `cognito-idp:CreateUserPool`・`cognito-idp:UpdateUserPool`・`cognito-idp:DeleteUserPool`・`cognito-idp:TagResource`・`cognito-idp:UntagResource`・`cognito-idp:SetUserPoolMfaConfig` | `userpool/<POOL_ID>`（`aws:ResourceTag/Project=CraftLatch`） | denied |
+| `cognito-idp:CreateUserPoolClient`・`cognito-idp:UpdateUserPoolClient`・`cognito-idp:CreateUserPoolDomain`・`cognito-idp:CreateGroup`・`cognito-idp:CreateManagedLoginBranding`・`cognito-idp:ListUserPoolClients` | `userpool/<POOL_ID>`（`aws:ResourceTag/Project=CraftLatch`） | allowed |
+| 同上 | `userpool/<POOL_ID>`（タグ条件なし・`aws:ResourceTag/Project=Other`） | denied |
 
-- [ ] **Step 5: 未検証事項 U8・U10・U11 の結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**（U8: 引数名、U10: もう一度 `workflow_dispatch` で apply して Lambda の差分が出ないか、U11: Step 3 の apply が権限不足なく通ったことと Step 4 の表）
+Cognito のタグ条件は `--context-entries "ContextKeyName=aws:ResourceTag/Project,ContextKeyValues=CraftLatch,ContextKeyType=string"`（別の値のケースは `Other`）で与える。plan ロール（`--policy-source-arn <plan ロール ARN>`）では次を確認する。
+
+| アクション | 対象 | 期待 |
+|---|---|---|
+| `lambda:GetFunction`・`sqs:GetQueueAttributes`・`iam:GetRole` | `function:craftlatch-auth`・`craftlatch-grants`・`role/craftlatch-auth-role` | allowed |
+| `lambda:GetFunction` | `function:other-function` | denied |
+| `iam:GetRole` | `role/other-role` | denied |
+| `sqs:GetQueueAttributes` | `other-queue` | denied |
+| `cognito-idp:DescribeUserPoolClient` | `userpool/<POOL_ID>`（`aws:ResourceTag/Project=CraftLatch`／タグ条件なし） | allowed／denied |
+| `cognito-idp:ListUsers` | `userpool/<POOL_ID>`（`aws:ResourceTag/Project=CraftLatch`） | denied |
+
+- [ ] **Step 5: 未検証事項 U8・U10・U11 の結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**（U8: 引数名、U10: もう一度 `workflow_dispatch` で apply して Lambda の差分が出ないか、U11: Step 3 の apply と Task 12 Step 6 の PR の plan が権限不足なく通ったことと Step 4 の表）
 
 ### Task 15: Ubuntu 側の構築と結合試験（管理者が sudo を実行）
 

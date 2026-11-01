@@ -24,7 +24,7 @@
 
 ### Cognito ユーザーの追加・削除
 
-`<POOL_ID>` はリポジトリのルートで `terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"` の後に `terraform -chdir=infra/terraform output -raw user_pool_id` を実行して取得します。
+`<POOL_ID>` はリポジトリのルートで `terraform -chdir=infra/bootstrap init -backend-config="bucket=<BUCKET>" -backend-config="key=bootstrap/terraform.tfstate"` の後に `terraform -chdir=infra/bootstrap output -raw user_pool_id` を実行して取得します。
 
 追加（一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させます。14 文字以上）:
 
@@ -220,6 +220,8 @@ sudo systemctl restart craftlatch-firewall.service
 
 GitHub Actions の apply ロール（`craftlatch-gha-apply`）、または main ブランチと `production` の承認関門を制御できる者は、許可の偽造が可能です。このロールは `UpdateFunctionCode`（Lambda のコードを差し替えて任意の IP を SQS に送らせる）、キューポリシーの変更、信頼ポリシーの変更の権限を持つためです。
 
+Cognito については、apply ロールは User Pool 配下（アプリクライアントのコールバック URL・ドメイン・グループ・ブランディング）を変更できますが、User Pool 本体（パスワードポリシー・サインアップの設定・削除保護・タグ）の作成・変更・削除・タグ付けは明示的に拒否されています。他のシステムの User Pool をタグ付けで管理下に入れることもできません。User Pool 本体を変更できるのは bootstrap を実行する管理者の認証情報だけです。
+
 - 管理者の GitHub アカウントを保護してください（2 要素認証のパスキー、端末の保護）。承認は第三者のレビューではなく、自分で内容を確認する関門です。
 - 管理者が保護ルールを変更できるため、管理者アカウントの侵害にはこの関門は無力です。
 - 不審な Lambda の更新や IAM の変更がないか、CloudTrail の管理イベント（`UpdateFunctionCode`、`SetQueueAttributes`、`UpdateAssumeRolePolicy`）を定期的に確認すると検知できます。
@@ -249,6 +251,7 @@ sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 通常の変更は PR を作り、`terraform-plan` の結果（リソースの作成・変更・削除の件数）を確認して main にマージし、`production` の承認で apply します。
 
 - 公開ログに出るのは件数・コミット SHA・失敗したコマンド名と終了コードだけです。失敗の原因は、手元で同じコミットに対して `terraform plan` を実行して調べます（リポジトリのルートで `terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"` の後に `terraform -chdir=infra/terraform plan`）。
-- `infra/bootstrap`（OIDC プロバイダー・GHA ロール・Boundary）は、管理者が手元で適用します（`setup.md` ②）。変更の後は、`workflow_dispatch` で apply ワークフローを実行し、ロールを引き受けられて差分がないことを確認します。
+- `infra/bootstrap`（OIDC プロバイダー・GHA ロール・Boundary・User Pool）は、管理者が手元で適用します（`setup.md` ②。既存の OIDC プロバイダーを使っている場合は毎回 `existing_github_oidc_provider_arn` を渡します）。変更の後は、`workflow_dispatch` で apply ワークフローを実行し、ロールを引き受けられて差分がないことを確認します。
+- User Pool の設定（パスワードポリシーなど）の変更は、PR ではなく管理者が `infra/bootstrap/cognito.tf` を変更して bootstrap を適用します（apply ロールには User Pool 本体の変更権限がありません）。User Pool には削除保護が付いています。削除が必要な場合だけ、`deletion_protection` を `INACTIVE` にして bootstrap を適用してから削除します（ユーザーもすべて消えます）。
 - プロバイダーの更新は、`terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` を両方のルート（`infra/bootstrap`、`infra/terraform`）でやり直し、明示的な PR で行います。
 - `queue_url` などの出力は手元の `terraform -chdir=infra/terraform output -raw <名前>` で確認し、CI のログに出力しません。

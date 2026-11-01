@@ -214,7 +214,7 @@ sequenceDiagram
 ### 3.3 リポジトリ構成（実装時）
 
 ```
-infra/bootstrap/          GitHub OIDC プロバイダー・GHA 用 IAM ロール・Permissions Boundary（管理者が手元で 1 回だけ実行）
+infra/bootstrap/          GitHub OIDC プロバイダー・GHA 用 IAM ロール・Permissions Boundary・User Pool（管理者が手元で 1 回だけ実行）
 infra/terraform/          versions.tf backend.tf variables.tf cognito.tf api.tf lambda.tf sqs.tf iam.tf outputs.tf
 src/lambda/craftlatch_auth/handler.py
 host/lib/                 common.py poll.py apply.py idle.py notify.py fwcheck mc-stop
@@ -234,6 +234,8 @@ docs/                     setup.md operations.md user-guide.md（第 12 章）
 
 ### 4.1 Cognito User Pool `craftlatch-users`
 
+User Pool 本体は `infra/bootstrap`（4.7）で管理者が作成・変更する。AWS アカウントは他のシステムと共有する前提で、GitHub Actions の apply ロールに User Pool の作成（とその依存アクションのタグ付け）を許すと、同じアカウントのタグのない User Pool に `Project=CraftLatch` を付けて管理下に入れられるためである。削除保護を有効にする。`infra/terraform` は名前 `craftlatch-users` で User Pool を参照し（`data "aws_cognito_user_pools"`）、ちょうど 1 件でなければ plan・apply を停止する。グループ・ドメイン・アプリクライアント・Managed Login ブランディングは `infra/terraform` で作成する。
+
 | 項目 | 設定 | 理由 |
 |---|---|---|
 | プラン | Essentials | Managed Login と `prompt=login` に必要。10,000 MAU まで無料 |
@@ -243,6 +245,7 @@ docs/                     setup.md operations.md user-guide.md（第 12 章）
 | MFA | OFF | 合意事項 |
 | パスワードポリシー | 最小 14 文字（文字種の条件は任意） | MFA がないため長さで補う |
 | アカウント復旧 | 管理者リセットのみ | メール送信の設定が不要。メールアカウント侵害で突破されない |
+| 削除保護 | 有効（`deletion_protection = ACTIVE`） | 共有アカウントでの誤削除を防ぐ。削除は bootstrap の管理者が意図して外した場合のみ |
 | ユーザー存在エラーの秘匿 | 有効 | ユーザー名の列挙を防ぐ |
 | グループ | `minecraft` | 所属しないユーザーは認証に成功しても拒否 |
 | ドメイン | Cognito プレフィックスドメイン | 無料。独自ドメインは使わない |
@@ -366,9 +369,9 @@ Terraform が作成する IAM ロール・ユーザー（`craftlatch-auth-role`�
 - ルートモジュール 1 つ。モジュール分割はしない。
 - 変数: `region`、`project`（既定 `craftlatch`）のみ。Cognito ドメインのプレフィックスは変数にせず `random_id`（`byte_length = 4`）で生成する（`craftlatch-<16 進 8 桁>`）。アカウント ID は変数にせず `data "aws_caller_identity"` で取得する（公開リポジトリにアカウント ID を書かないため）。
 - CI では常に `-input=false` を付ける。
-- 実行は GitHub Actions（4.7）。管理者が手元で実行するのは、`infra/bootstrap/` の適用（初回および変更・復旧時）と、詳細な差分確認のための `terraform plan` のみ。
+- 実行は GitHub Actions（4.7）。管理者が手元で実行するのは、`infra/bootstrap/` の適用（初回および変更・復旧時。User Pool の設定変更を含む）と、詳細な差分確認のための `terraform plan` のみ。
 - Lambda のコードのデプロイも Terraform で行う。`archive_file` データソースで `src/lambda/craftlatch_auth/` を ZIP にし（`__pycache__`・テストは除外。外部ライブラリがないため `pip install` 等のビルド工程はない）、`aws_lambda_function` の `filename` と `source_code_hash` に渡す。コードが変わればハッシュが変わり、apply で Lambda が更新される。
-- 出力: ログイン URL、User Pool ID、キュー URL、`craftlatch-host` の ARN。
+- 出力: ログイン URL、キュー URL、`craftlatch-host` の ARN。User Pool ID は `infra/bootstrap` の出力 `user_pool_id`（4.1）。
 - 実装時に確認する事項: Cognito のプラン指定（`user_pool_tier`）と HTTP API の `ip_address_type` の引数名・対応プロバイダーバージョン。
 
 state バケットの事前作成（Terraform 実行前に 1 回だけ）:
@@ -415,7 +418,8 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 
 **plan ロールの権限**
 
-- 管理対象サービス（Cognito、API Gateway、Lambda、SQS、IAM、CloudWatch Logs）の `Describe*`・`Get*`・`List*` 系の読み取り。SQS のメッセージ受信（`sqs:ReceiveMessage`）は含めない。
+- 管理対象サービス（Cognito、API Gateway、Lambda、SQS、IAM、CloudWatch Logs）の読み取りのうち、`terraform plan` の refresh と data source がプロバイダーから呼ぶものだけを、CraftLatch のリソースに限定して許可する（共有アカウントで、PR のコードから他のシステムの Lambda の環境変数・コード、IAM、キュー属性等を読めないようにする）。Lambda は `function:craftlatch-*`、IAM は `role/craftlatch-auth-role`・`user/craftlatch-host`・`policy/craftlatch-boundary`、SQS は `craftlatch-grants`、CloudWatch Logs は `log-group:/aws/lambda/craftlatch-*`、Cognito は `userpool/*` をタグ `Project=CraftLatch` の条件付きで、API Gateway は `/apis/*` をタグ `Project=CraftLatch` の条件付きで、`/tags/*` を GET のみ。リソース単位で限定できない一覧系（`iam:ListPolicies`、`logs:DescribeLogGroups`、`cognito-idp:ListUserPools`・`DescribeUserPoolDomain`）のみ `*` とする。SQS のメッセージ受信（`sqs:ReceiveMessage`）は含めない。
+- 利用者名・IP を含む読み取り（`cognito-idp:ListUsers`・`ListUsersInGroup`、`logs:GetLogEvents`・`GetLogRecord`・`GetQueryResults`）は明示的に拒否する。
 - 上記の state バケットの権限。
 
 **apply ロールの権限**（権限昇格を防ぐため、IAM 関連はステートメントを分ける）
@@ -426,13 +430,18 @@ apply の `sub` 自体には main ブランチの条件が含まれない。main
 | 権限の付与・更新・削除 | `iam:PutRolePolicy`、`iam:DeleteRolePolicy`、`iam:PutUserPolicy`、`iam:DeleteUserPolicy`、`iam:TagRole`、`iam:TagUser`、`iam:UpdateAssumeRolePolicy`、`iam:DeleteRole`、`iam:DeleteUser`、読み取り系 | 対象は上記 2 つの正確な ARN のみ。インラインポリシーのみ使い、`iam:AttachRolePolicy`・`iam:AttachUserPolicy` は許可しない |
 | ロールの受け渡し | `iam:PassRole` | 対象は `role/craftlatch-auth-role` の ARN のみ。条件 `iam:PassedToService = lambda.amazonaws.com` |
 | 明示的な拒否 | `iam:DeleteRolePermissionsBoundary`、`iam:DeleteUserPermissionsBoundary`、`iam:PutRolePermissionsBoundary`、`iam:PutUserPermissionsBoundary` | すべてのリソース（Boundary の削除・付け替えを禁止） |
-| 明示的な拒否 | IAM の全書き込みアクション（`iam:Create*`・`iam:Put*`・`iam:Update*`・`iam:Delete*`・`iam:Attach*`・`iam:Detach*`・`iam:SetDefaultPolicyVersion`・`iam:Tag*`・`iam:Untag*` 等） | `role/craftlatch-gha-*`、`policy/craftlatch-boundary`、OIDC プロバイダー（GHA 用ロール・Boundary・ポリシーバージョンの変更を禁止） |
-| アプリケーションのリソース | Cognito・API Gateway・Lambda・SQS・CloudWatch Logs の作成・変更・削除 | 名前またはタグ `Project=CraftLatch` で `craftlatch-*` のリソースに限定（サービスごとに ARN・条件の書き方が異なるため、具体的なポリシーは実装時に U11 で検証する） |
+| 明示的な拒否 | IAM の全書き込みアクション（`iam:Create*`・`iam:Put*`・`iam:Update*`・`iam:Delete*`・`iam:Attach*`・`iam:Detach*`・`iam:SetDefaultPolicyVersion`・`iam:Tag*`・`iam:Untag*` 等） | `role/craftlatch-gha-*`、`policy/craftlatch-boundary`、OIDC プロバイダー（GHA 用ロール・Boundary・ポリシーバージョンの変更を禁止。既存の共有プロバイダーを使う場合はそれも守る） |
+| Cognito | User Pool 配下（グループ・ドメイン・アプリクライアント・Managed Login ブランディング）の作成・更新・削除と読み取り。`cognito-idp:ListUserPools`・`DescribeUserPoolDomain`（リソース種別がないため `*`） | `userpool/*` を条件 `aws:ResourceTag/Project = CraftLatch` で限定（配下のアクションは User Pool の ARN・タグで判定される） |
+| 明示的な拒否 | User Pool 本体の作成・変更・削除・タグ付け（`cognito-idp:CreateUserPool`・`UpdateUserPool`・`DeleteUserPool`・`TagResource`・`UntagResource`・`SetUserPoolMfaConfig`・`AddCustomAttributes`） | すべてのリソース（User Pool 本体は bootstrap で管理者が扱う。4.1） |
+| アプリケーションのリソース | API Gateway・Lambda・SQS・CloudWatch Logs の作成・変更・削除 | 名前またはタグ `Project=CraftLatch` で `craftlatch-*` のリソースに限定（サービスごとに ARN・条件の書き方が異なるため、具体的なポリシーは実装時に U11 で検証する） |
 | その他 | 上記の state バケットの権限 | — |
+
+AWS アカウントは他のシステムと共有する前提とする。名前の接頭辞 `craftlatch-` で絞る権限（plan・apply・Boundary）は、同じアカウントで `craftlatch-` で始まる名前を他のシステムが使わないことを前提とする。
 
 **bootstrap（`infra/bootstrap/`）**
 
-- OIDC プロバイダー・2 つの GHA ロール・Boundary を管理する。GHA が動く前に必要で、かつ通常の apply ロールからは変更できないため、**初回および変更・復旧時に管理者が手元から実行する**。
+- OIDC プロバイダー・2 つの GHA ロール・Boundary・User Pool（4.1）を管理する。GHA が動く前に必要で、かつ通常の apply ロールからは変更できないため、**初回および変更・復旧時に管理者が手元から実行する**。
+- OIDC プロバイダー（`token.actions.githubusercontent.com`）はアカウントに 1 つしか作れない。他のシステムが既に作っている場合は、変数 `existing_github_oidc_provider_arn` にその ARN を渡し、作成せずに使う（そのプロバイダーの `client_id_list` に `sts.amazonaws.com` が含まれている必要がある。bootstrap はそのプロバイダーを変更・削除しない）。
 - 管理者は GHA ロールとは別の管理者用の認証情報（`AWS_PROFILE` 等）を使う。
 - backend は部分設定で、`terraform init -backend-config="bucket=<バケット名>" -backend-config="key=bootstrap/terraform.tfstate"` で初期化する。
 - 手順: `terraform init` → `terraform plan` で差分を確認 → `terraform apply` → GitHub Actions の plan・apply が引き続きロールを引き受けられることを確認（`workflow_dispatch` で apply ワークフローを実行し、差分がないことを確認）。手順は `docs/setup.md` と `docs/operations.md` に書く。
