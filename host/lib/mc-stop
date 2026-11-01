@@ -23,6 +23,7 @@ if [ ! -p "$console" ]; then
     exit 1
 fi
 
+# shellcheck disable=SC2016  # $1 は子シェルの位置引数（パスをコマンド文字列に埋め込まないため意図的に単一引用符）
 if ! timeout 5 sh -c 'printf "stop\n" > "$1"' sh "$console"; then
     echo "mc-stop: stop を書き込めませんでした: $console" >&2
     exit 1
