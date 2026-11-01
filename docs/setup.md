@@ -28,11 +28,12 @@ aws s3api put-public-access-block --bucket craftlatch-tfstate-<ACCOUNT_ID> --pub
 
 `infra/bootstrap` は GitHub Actions が動く前に必要で、通常の apply ロールからは変更できないため、管理者が手元から実行します。
 
+リポジトリのルートで実行します（`cd` は使いません）。
+
 ```
-cd infra/bootstrap
-terraform init -backend-config="bucket=<BUCKET>" -backend-config="key=bootstrap/terraform.tfstate"
-terraform plan -var="state_bucket=<BUCKET>"
-terraform apply -var="state_bucket=<BUCKET>"
+terraform -chdir=infra/bootstrap init -backend-config="bucket=<BUCKET>" -backend-config="key=bootstrap/terraform.tfstate"
+terraform -chdir=infra/bootstrap plan -var="state_bucket=<BUCKET>"
+terraform -chdir=infra/bootstrap apply -var="state_bucket=<BUCKET>"
 ```
 
 - `state_bucket` は必須の変数です。アカウント ID を含むため、`-var` で渡すか、コミットされない `terraform.tfvars`（`*.tfvars` は `.gitignore` 済み）に書きます。
@@ -40,13 +41,13 @@ terraform apply -var="state_bucket=<BUCKET>"
 - apply 後、次の出力を控えます（③の Secret に設定します）。
 
 ```
-terraform output -raw plan_role_arn
-terraform output -raw apply_role_arn
+terraform -chdir=infra/bootstrap output -raw plan_role_arn
+terraform -chdir=infra/bootstrap output -raw apply_role_arn
 ```
 
 ### ロックファイルのコミット
 
-CI は `terraform init -lockfile=readonly` を使うため、`.terraform.lock.hcl` が先にコミットされていないと CI が失敗します。開発機（Apple Silicon の Mac）と CI（Linux x86_64）の両方で使えるよう、両方のルートで次を実行します。
+CI は `terraform init -lockfile=readonly` を使うため、`.terraform.lock.hcl` が先にコミットされていないと CI が失敗します。開発機（Apple Silicon の Mac）と CI（Linux x86_64）の両方で使えるよう、両方のルートで、リポジトリのルートから次を実行します。
 
 ```
 terraform -chdir=infra/bootstrap providers lock -platform=linux_amd64 -platform=darwin_arm64
@@ -104,12 +105,11 @@ terraform -chdir=infra/terraform providers lock -platform=linux_amd64 -platform=
 3. マージ後に `terraform-apply` ワークフローが起動する。Environment `production` の承認待ちになるので、Actions の画面で内容（コミット SHA）を確認して承認する（初回 apply）。
 4. 成功したら、ジョブサマリーの作成件数を確認する。失敗した場合、公開ログには失敗したコマンド名と終了コードしか出ません。原因は手元で調べます（次項）。
 
-**手元での確認（plan・output）** は、管理者用の認証情報で行います。
+**手元での確認（plan・output）** は、管理者用の認証情報で、リポジトリのルートから行います。
 
 ```
-cd infra/terraform
-terraform init -backend-config="bucket=<BUCKET>"
-terraform plan
+terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"
+terraform -chdir=infra/terraform plan
 ```
 
 ### 未検証事項 U11 / 初回実行時の確認
@@ -122,19 +122,18 @@ apply ロールと plan ロールに必要な IAM アクションの最小集合
 
 ### `queue_url` を取得する（手元でのみ）
 
-ホストの設定に必要です。**CI のログには決して出力しません。** 管理者が手元で `terraform output` を実行します。
+ホストの設定に必要です。**CI のログには決して出力しません。** 管理者が手元の、リポジトリのルートで `terraform output` を実行します。
 
 ```
-cd infra/terraform
-terraform init -backend-config="bucket=<BUCKET>"
-terraform output -raw queue_url
+terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"
+terraform -chdir=infra/terraform output -raw queue_url
 ```
 
-値は⑥で `/etc/craftlatch/config.json` に入力します。シェルの履歴やチャットに貼らないでください。ログイン URL と User Pool ID も同じ方法で取得できます（`terraform output -raw login_url`、`terraform output -raw user_pool_id`）。ログイン URL は利用者に直接共有します（リポジトリには書きません）。
+値は⑥で `/etc/craftlatch/config.json` に入力します。シェルの履歴やチャットに貼らないでください。ログイン URL と User Pool ID も同じ方法で取得できます（`terraform -chdir=infra/terraform output -raw login_url`、`terraform -chdir=infra/terraform output -raw user_pool_id`）。ログイン URL は利用者に直接共有します（リポジトリには書きません）。
 
 ## ⑤ Cognito ユーザーの作成
 
-`<POOL_ID>` は `terraform output -raw user_pool_id` で取得します。
+`<POOL_ID>` は、リポジトリのルートで `terraform -chdir=infra/terraform output -raw user_pool_id` を実行して取得します。
 
 ```
 aws cognito-idp admin-create-user --user-pool-id <POOL_ID> --username <NAME> --temporary-password '<TEMP_PASSWORD>' --message-action SUPPRESS
@@ -158,6 +157,15 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 ```
 sudo apt install python3-boto3 nftables
 ```
+
+4. サーバーに AWS CLI v2 を導入する（初回のアクセスキー発行とキーのローテーションで使います。Ubuntu 24.04 には apt の `awscli` パッケージがないため snap を使います）。
+
+```
+sudo snap install aws-cli --classic
+```
+
+5. サーバー上の管理者用の AWS 認証情報は、**一時的なもの（SSO や短期間のプロファイル）だけ**を使い、作業が終わったら削除してください（`aws sso logout`、または `~/.aws` の該当プロファイルの削除）。キー作成の権限をサーバーに残さないためです（設計書 9.1）。長期のアクセスキーをサーバーに置かないでください。
+6. **本番サーバーで確認すること:** `sudo` 下で管理者のプロファイルが読めるか（`sudo` は `HOME` を `/root` に変えるため）。ローテーションの手順は `docs/operations.md` 3 章を参照してください。
 
 ### 既存環境からの移行
 
@@ -185,11 +193,21 @@ sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 
 秘密情報は Terraform の state にもリポジトリにも置きません。`craftlatch-host` の最初のアクセスキーは、管理者用の認証情報で発行してサーバー上に直接書き出します（表示はされません）。ファイルは先に 0400 で作ってから書き込みます。
 
+先に `sudo -v` で sudo の認証を済ませておきます（パイプの途中でパスワードを求められると、空のファイルになるのを防ぐため）。
+
 ```
+sudo -v
 sudo install -d -m 0755 /etc/craftlatch
 sudo install -m 0400 -o root -g root /dev/null /etc/craftlatch/aws-credentials
 aws iam create-access-key --user-name craftlatch-host --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text | awk '{printf "[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n", $1, $2}' | sudo tee /etc/craftlatch/aws-credentials > /dev/null
 date +%F | sudo tee /etc/craftlatch/aws-credentials.rotated
+```
+
+書き込めたかを確認します（空のファイルを検出するため）。1 つ目はキーが 1 本増えていること、2 つ目は `1` が表示されることを確認します。
+
+```
+aws iam list-access-keys --user-name craftlatch-host
+sudo grep -c '^aws_access_key_id = AKIA' /etc/craftlatch/aws-credentials
 ```
 
 `aws-credentials.rotated` は発行日（`YYYY-MM-DD`）で、335 日経過すると poll が警告を出します。Discord Webhook URL も同様に 0400 で置きます。

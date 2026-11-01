@@ -24,7 +24,7 @@
 
 ### Cognito ユーザーの追加・削除
 
-`<POOL_ID>` は手元で `terraform output -raw user_pool_id`（`infra/terraform` で `terraform init -backend-config="bucket=<BUCKET>"` 後）で取得します。
+`<POOL_ID>` はリポジトリのルートで `terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"` の後に `terraform -chdir=infra/terraform output -raw user_pool_id` を実行して取得します。
 
 追加（一時パスワードは別の経路で本人に伝え、初回ログイン時に変更させます。14 文字以上）:
 
@@ -104,24 +104,26 @@ sudo systemctl status craftlatch-firewall.service
 
 `craftlatch-host` のアクセスキーを入れ替えます。335 日経過すると poll が警告を出します。サーバー再構築、ディスクの交換・廃棄、バックアップ流出の疑い、管理者 PC の不審があるときは、期限に関係なく更新します。
 
-スクリプトは root で動かしますが、AWS の操作には**管理者の一時的な認証情報**を使います。`sudo` は環境変数を落とすので、`AWS_PROFILE` を引き継ぎます。
+スクリプトは root で動かしますが、AWS の操作には**管理者の一時的な認証情報**を使います。`sudo` は環境変数を落とし、`HOME` も `/root` に変えるため、`AWS_PROFILE` と `HOME` の両方を引き継ぎます（`HOME` を引き継がないと、aws CLI が `/root/.aws` を探してプロファイルや SSO のキャッシュが見つかりません）。リポジトリのルートで実行します。
 
 ```
-sudo --preserve-env=AWS_PROFILE host/scripts/craftlatch-rotate-key
+sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key
 ```
 
-`--preserve-env` が許可されていない環境では、次のように渡します。
+`--preserve-env` が許可されていない環境では、設定ファイルの場所を明示して渡します。
 
 ```
-sudo env AWS_PROFILE=<PROFILE> host/scripts/craftlatch-rotate-key
+sudo env AWS_PROFILE=<PROFILE> AWS_CONFIG_FILE=$HOME/.aws/config AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials host/scripts/craftlatch-rotate-key
 ```
+
+**本番サーバーで確認すること:** 実際にこの方法で管理者のプロファイルが `sudo` 下で使えるか（SSO を使う場合は、キャッシュが読まれてトークンが有効か）を、最初に `sudo --preserve-env=AWS_PROFILE,HOME aws sts get-caller-identity` で確認してからローテーションを実行してください。ローテーション後は、サーバー上の管理者用の一時認証情報を削除します。
 
 スクリプトは新しいキーの発行と単独での検証、poll の停止と実行待ち、切り替え、新しいキーでの受信確認までを行い、確認できた時点で新しいキーを確定します。その後、`aws-credentials.rotated` の更新、`craftlatch-poll.timer` の再開、古いキーの無効化と削除を行います。秘密の値は表示しません。確定前に失敗した場合は、元の状態に戻して新しいキーを削除し、終了コード 1 で終了します。
 
 確定後の整理（古いキーの無効化・削除など）で失敗した場合、新しいキーは維持されます。表示された作業名の原因を取り除いてから、古いキーの ID を指定して残りの整理だけを再実行します。
 
 ```
-sudo --preserve-env=AWS_PROFILE host/scripts/craftlatch-rotate-key --finish <OLD_KEY_ID>
+sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key --finish <OLD_KEY_ID>
 ```
 
 - `--finish` は何度実行しても同じ結果になります。古いキーがすでに削除済みの場合は完了済みとして扱います。
@@ -130,38 +132,46 @@ sudo --preserve-env=AWS_PROFILE host/scripts/craftlatch-rotate-key --finish <OLD
 
 ## 4. ルールの変更（`trusted_sources`・ポート・許可期限）
 
-`config.json` の `trusted_sources`・`java_port`・`bedrock_port`・`grant_timeout_sec` を変えると、nft ルールが変わります。fwcheck の期待構造は `host/lib/fwcheck-expected.json`（インストール先は `/usr/local/lib/craftlatch/fwcheck-expected.json`）という雛形から組み立てるため、**雛形を取り直さないと fwcheck が設定と雛形の不一致で失敗し、Minecraft は起動しません**（fail-closed）。変更の都度、次の手順で雛形を更新します。作業はリポジトリのチェックアウトで、作業用ディレクトリは書き込み可能な任意の場所（`<WORK>`）です。
+`config.json` の `trusted_sources`・`java_port`・`bedrock_port`・`grant_timeout_sec` を変えると、nft ルールが変わります。fwcheck の期待構造は `host/lib/fwcheck-expected.json`（インストール先は `/usr/local/lib/craftlatch/fwcheck-expected.json`）という雛形から組み立てるため、**雛形を取り直さないと fwcheck が設定と雛形の不一致で失敗し、Minecraft は起動しません**（fail-closed）。**順序が重要です。** 本番の `/etc/craftlatch/config.json` を先に編集すると、`install.sh` で新しい雛形を配置するまでの間、fwcheck が新しい設定と古い雛形を比較して失敗し、認証による Minecraft の起動がすべて失敗します（`StartLimitBurst` により 3 回で起動を諦めます）。そのため、本番の設定は**最後に**変更します。
 
-1. 変更後の設定ファイルを作る。本番の `/etc/craftlatch/config.json` を編集し、その写しのルーター MAC だけをプレースホルダー `aa:bb:cc:dd:ee:ff` に置き換える（雛形に本物の MAC を残さないため）。`queue_url` にはアカウント ID が入るため、写しはコミットせず、作業後に削除する。
+1. リポジトリのルートで、チェックアウトの外に作業用ディレクトリを作る（`queue_url` にアカウント ID が入る写しを、誤ってコミットしないため）。表示されたパスを以降の `<WORK>` に使う。
+
+```
+mktemp -d
+```
+
+2. 現在の設定の写しを作り、ルーターの MAC だけをプレースホルダー `aa:bb:cc:dd:ee:ff` に置き換える（雛形に本物の MAC を残さないため）。
 
 ```
 cp /etc/craftlatch/config.json <WORK>/config-template.json && sed -E -i 's/("exclude_ether_saddr": *")[^"]*"/\1aa:bb:cc:dd:ee:ff"/' <WORK>/config-template.json
 ```
 
-   `trusted_sources` などを変える場合は、写しにも同じ変更を加える（`sudoedit /etc/craftlatch/config.json` での本番の編集もあわせて行う）。
+3. 写し（`<WORK>/config-template.json`）の `trusted_sources`・ポート・許可期限を、変更後の値に編集する。この時点では本番の設定は変えない。
 
-2. ルールファイルを生成する。リポジトリのルートで実行する（`nftgen.py` は既定の設定パスしか読まないため、写しを読むようにモジュールを直接呼ぶ）。出力は、雛形用なので MAC が `aa:bb:cc:dd:ee:ff` のルールになる。
+4. リポジトリのルートで、写しからルールファイルを生成する（`nftgen.py` は既定の設定パスしか読まないため、写しを読むようにモジュールを直接呼ぶ）。出力は MAC が `aa:bb:cc:dd:ee:ff` のルールになる。
 
 ```
 python3 -E -s -c 'import sys; sys.path.insert(0, "host/lib"); from pathlib import Path; from common import load_config; from nftgen import render_ruleset; sys.stdout.write(render_ruleset(load_config(Path(sys.argv[1]))))' <WORK>/config-template.json > <WORK>/template.nft
 ```
 
-3. 使い捨てのネットワーク名前空間に読み込み、JSON を取り出す。本番のルールには影響しない。
+5. 使い捨てのネットワーク名前空間に読み込み、JSON を取り出す。本番のルールには影響しない。
 
 ```
 sudo unshare --net sh -c 'nft -f <WORK>/template.nft && nft -j list table inet craftlatch' > <WORK>/nft_list_table.json
 ```
 
-4. リポジトリの雛形を置き換える。
+6. リポジトリの雛形を置き換える。
 
 ```
 cp <WORK>/nft_list_table.json host/lib/fwcheck-expected.json
 ```
 
-5. 内容（MAC が `aa:bb:cc:dd:ee:ff`、ポート、許可期限）を `git diff` で確認し、コミットする。`<WORK>` の一時ファイルを削除する。
-6. サーバー上で `sudo host/install.sh` を再実行する。雛形と新しい nft ルールが配置され、更新時の案内が表示される（5 章）。nft ルールが変わった場合は `sudo systemctl restart craftlatch-firewall.service` を案内どおりに実行する。
-
-`sudo host/install.sh` を実行する前に `/etc/craftlatch/config.json` を編集しておくと、nft ルールが再生成されます。`install.sh` が配置するのは雛形（`fwcheck-expected.json`）とルールで、`config.json` は上書きしません。
+7. `git diff` で内容（MAC が `aa:bb:cc:dd:ee:ff`、ポート、許可期限）を確認する。`<WORK>` の一時ファイルを削除する。`queue_url` を含む写しは絶対にコミットしない。
+8. ブランチを作って雛形をコミットし、PR を作成して main にマージする（main は PR 経由のマージが必須です）。
+9. サーバー上のチェックアウトで `git pull` する。
+10. **ここで初めて**本番の設定を変更する。`sudoedit /etc/craftlatch/config.json` で、手順 3 と同じ変更を加える（本物のルーター MAC は変えない）。
+11. `sudo host/install.sh` を実行する。雛形と新しい nft ルールが配置され、更新時の案内が表示される（5 章）。`config.json` は上書きされない。
+12. 案内どおりに `sudo systemctl restart craftlatch-firewall.service` を実行する（Minecraft の停止と許可リストの消去を伴う。プレイヤーがいない時間に行う）。
 
 ## 5. `install.sh` の更新時の案内
 
@@ -238,7 +248,7 @@ sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 
 通常の変更は PR を作り、`terraform-plan` の結果（リソースの作成・変更・削除の件数）を確認して main にマージし、`production` の承認で apply します。
 
-- 公開ログに出るのは件数・コミット SHA・失敗したコマンド名と終了コードだけです。失敗の原因は、手元で同じコミットに対して `terraform plan` を実行して調べます（`infra/terraform` で `terraform init -backend-config="bucket=<BUCKET>"` の後）。
+- 公開ログに出るのは件数・コミット SHA・失敗したコマンド名と終了コードだけです。失敗の原因は、手元で同じコミットに対して `terraform plan` を実行して調べます（リポジトリのルートで `terraform -chdir=infra/terraform init -backend-config="bucket=<BUCKET>"` の後に `terraform -chdir=infra/terraform plan`）。
 - `infra/bootstrap`（OIDC プロバイダー・GHA ロール・Boundary）は、管理者が手元で適用します（`setup.md` ②）。変更の後は、`workflow_dispatch` で apply ワークフローを実行し、ロールを引き受けられて差分がないことを確認します。
 - プロバイダーの更新は、`terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` を両方のルート（`infra/bootstrap`、`infra/terraform`）でやり直し、明示的な PR で行います。
-- `queue_url` などの出力は手元の `terraform output -raw` で確認し、CI のログに出力しません。
+- `queue_url` などの出力は手元の `terraform -chdir=infra/terraform output -raw <名前>` で確認し、CI のログに出力しません。
