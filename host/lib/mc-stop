@@ -1,0 +1,40 @@
+#!/bin/sh
+# minecraft.service の ExecStop: コンソール FIFO に stop を書き、Java の終了を待つ
+set -u
+
+pid="${1:-}"
+[ -z "$pid" ] && exit 0
+
+case "$pid" in
+    *[!0-9]*)
+        echo "mc-stop: PID が不正です" >&2
+        exit 1
+        ;;
+esac
+
+console="${MC_CONSOLE:-/run/minecraft.console}"
+wait_max="${MC_STOP_WAIT:-170}"
+case "$wait_max" in
+    '' | *[!0-9]*) wait_max=170 ;;
+esac
+
+if [ ! -p "$console" ]; then
+    echo "mc-stop: コンソール FIFO がありません: $console" >&2
+    exit 1
+fi
+
+# shellcheck disable=SC2016  # $1 は子シェルの位置引数（パスをコマンド文字列に埋め込まないため意図的に単一引用符）
+if ! timeout 5 sh -c 'printf "stop\n" > "$1"' sh "$console"; then
+    echo "mc-stop: stop を書き込めませんでした: $console" >&2
+    exit 1
+fi
+
+i=0
+while [ "$i" -lt "$wait_max" ]; do
+    kill -0 "$pid" 2>/dev/null || exit 0
+    sleep 1
+    i=$((i + 1))
+done
+
+# 終了しなければそのまま戻り、systemd の SIGTERM に任せる
+exit 0

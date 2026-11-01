@@ -25,3 +25,19 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# SSH
+.ssh/
+
+# Python / uv
+.venv/
+__pycache__/
+.pytest_cache/
+*.zip
+
+# Terraform
+.terraform/
+*.tfstate*
+tfplan*
+*.tfplan
+*.tfvars

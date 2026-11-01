@@ -1,0 +1,10 @@
+[Unit]
+Description=CraftLatch request watcher
+OnFailure=craftlatch-notify@%n.service
+
+[Path]
+PathExistsGlob=/run/craftlatch/requests/*.req
+Unit=craftlatch-apply.service
+
+[Install]
+WantedBy=paths.target

@@ -1,0 +1,14 @@
+{
+  "region": "ap-northeast-1",
+  "queue_url": "https://sqs.ap-northeast-1.amazonaws.com/<ACCOUNT_ID>/craftlatch-grants",
+  "java_port": 25565,
+  "bedrock_port": 19132,
+  "grant_timeout_sec": 600,
+  "idle_stop_sec": 900,
+  "slp_timeout_sec": 3,
+  "key_warn_days": 335,
+  "trusted_sources": [
+    {"iface": "enp3s0", "cidr": "192.168.33.0/24", "exclude_ether_saddr": "<ルーターのMAC>"},
+    {"iface": "wg0", "cidr": "10.0.0.0/24"}
+  ]
+}

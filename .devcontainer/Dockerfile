@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   curl \
   ca-certificates \
   bubblewrap \
+  openssh-client \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Generate the Japanese UTF-8 locale used by the shell and CLI tools.

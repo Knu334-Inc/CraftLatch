@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# craftlatch-host のアクセスキーをローテーションする（設計書 9.1）。
+# 使い方: sudo craftlatch-rotate-key [--finish <OLD_KEY_ID>]
+# 管理者の一時的な認証情報（AWS_PROFILE 等）で実行する。秘密の値は表示しない。
+set -euo pipefail
+
+test_mode=0
+[ -n "${CRAFTLATCH_ETC:-}" ] && test_mode=1
+
+AWS_CLI="${AWS_CLI:-aws}"
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
+CRAFTLATCH_ETC="${CRAFTLATCH_ETC:-/etc/craftlatch}"
+CRAFTLATCH_STATE="${CRAFTLATCH_STATE:-/var/lib/craftlatch}"
+verify_timeout="${CRAFTLATCH_VERIFY_TIMEOUT:-60}"
+poll_wait_timeout="${CRAFTLATCH_POLL_WAIT_TIMEOUT:-120}"
+retry_sleep="${CRAFTLATCH_SLEEP:-5}"
+iam_user="craftlatch-host"
+
+cred="$CRAFTLATCH_ETC/aws-credentials"
+cred_new="$cred.new"
+cred_old="$cred.old"
+cred_rotated="$cred.rotated"
+
+usage() {
+    echo "使い方: $0 [--finish <OLD_KEY_ID>]" >&2
+}
+
+die() {
+    echo "$*" >&2
+    exit 1
+}
+
+finish_only=0
+old_id=""
+case "$#" in
+    0) ;;
+    2)
+        if [ "$1" = "--finish" ]; then
+            finish_only=1
+            old_id="$2"
+        else
+            usage
+            exit 2
+        fi
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+if [ "$test_mode" -eq 0 ] && [ "$EUID" -ne 0 ]; then
+    die "root で実行してください"
+fi
+
+if [ "$finish_only" -eq 1 ] && ! [[ "$old_id" =~ ^[A-Z0-9]{16,128}$ ]]; then
+    die "--finish に渡すキー ID の形式が不正です"
+fi
+
+aws_bin=$(command -v "$AWS_CLI") || die "aws CLI が見つかりません: $AWS_CLI"
+
+# 現行の aws-credentials のキー ID を表示する
+current_key_id() {
+    sed -n 's/^aws_access_key_id[[:space:]]*=[[:space:]]*//p' "$cred" | head -n1 | tr -d '[:space:]'
+}
+
+# poll-failures が 0 であること（受信に成功したこと）を確認する
+poll_succeeded() {
+    local v=""
+    read -r v <"$CRAFTLATCH_STATE/poll-failures" 2>/dev/null || v=""
+    [ "$v" = "0" ]
+}
+
+# ---- 手順 6: 確定後の整理（何度実行しても同じ結果になる） ----
+
+# 失敗した作業名を表示して終了コード 1 で終了する。確定後は新しいキーを削除しない。
+commit_fail() {
+    echo "失敗: $1（新しいキーは維持しています。原因を除いて $0 --finish $old_id を実行してください）" >&2
+    exit 1
+}
+
+# iam_idempotent <作業名> <サブコマンド> [追加引数...]。NoSuchEntity は完了済みとみなす。
+iam_idempotent() {
+    local name="$1" sub="$2" out
+    shift 2
+    if ! out=$("$AWS_CLI" iam "$sub" --user-name "$iam_user" --access-key-id "$old_id" "$@" 2>&1); then
+        case "$out" in
+            *NoSuchEntity*) return 0 ;;
+        esac
+        echo "$out" >&2
+        commit_fail "$name"
+    fi
+}
+
+finish_steps() {
+    local today
+    # 現用のキーを無効化・削除してしまう誤指定を、IAM を呼ぶ前に防ぐ
+    if [ "$(current_key_id)" = "$old_id" ]; then
+        die "失敗: $old_id は現在使用中のキーです。何も実行しませんでした"
+    fi
+    today=$(date +%F)
+    (umask 022 && printf '%s\n' "$today" >"$cred_rotated") || commit_fail "aws-credentials.rotated の更新"
+    chmod 0644 -- "$cred_rotated" || commit_fail "aws-credentials.rotated の更新"
+    "$SYSTEMCTL" start craftlatch-poll.timer || commit_fail "craftlatch-poll.timer の再開"
+    iam_idempotent "古いキーの無効化(update-access-key)" update-access-key --status Inactive
+    iam_idempotent "古いキーの削除(delete-access-key)" delete-access-key
+    rm -f -- "$cred_old" || commit_fail "aws-credentials.old の削除"
+    echo "完了: 古いキー $old_id を無効化・削除しました"
+}
+
+if [ "$finish_only" -eq 1 ]; then
+    finish_steps
+    exit 0
+fi
+
+# ---- 確定前の復旧（手順 7） ----
+new_id=""
+timer_stopped=0
+switched=0
+
+delete_new_key() {
+    if [ -n "$new_id" ]; then
+        "$AWS_CLI" iam delete-access-key --user-name "$iam_user" --access-key-id "$new_id" \
+            || echo "警告: 新しいキー $new_id を削除できませんでした。手動で削除してください" >&2
+    fi
+    rm -f -- "$cred_new"
+}
+
+recover() {
+    echo "失敗: $1。変更を元に戻します" >&2
+    if [ "$switched" -eq 1 ]; then
+        mv -- "$cred_old" "$cred" || echo "警告: aws-credentials.old を戻せませんでした" >&2
+        if "$SYSTEMCTL" start craftlatch-poll.service && poll_succeeded; then
+            echo "旧キーでの受信を確認しました" >&2
+        else
+            echo "警告: 旧キーでも受信に失敗しました（新旧どちらのキーも使えません）。手動で原因を調べてください" >&2
+        fi
+        "$SYSTEMCTL" start craftlatch-poll.timer || echo "警告: craftlatch-poll.timer を再開できませんでした" >&2
+    elif [ "$timer_stopped" -eq 1 ]; then
+        "$SYSTEMCTL" start craftlatch-poll.timer || echo "警告: craftlatch-poll.timer を再開できませんでした" >&2
+    fi
+    delete_new_key
+    exit 1
+}
+
+# 手順 1: 旧キー ID を読み、新しいキーを発行して .new に書く
+[ -r "$cred" ] || die "現行の $cred を読めません"
+old_id=$(sed -n 's/^aws_access_key_id[[:space:]]*=[[:space:]]*//p' "$cred" | head -n1 | tr -d '[:space:]')
+[[ "$old_id" =~ ^[A-Z0-9]{16,128}$ ]] || die "現行の aws-credentials から旧キー ID を読み取れません"
+
+created=$("$AWS_CLI" iam create-access-key --user-name "$iam_user" \
+    --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text) \
+    || die "失敗: 新しいキーの発行"
+read -r new_id new_secret <<<"$created"
+created=""
+if [ -z "$new_id" ] || [ -z "$new_secret" ]; then die "失敗: 新しいキーの発行結果を解釈できません"; fi
+echo "新しいキーを発行しました: $new_id（旧キー: $old_id）"
+
+rm -f -- "$cred_new"
+(
+    umask 077
+    printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$new_id" "$new_secret" >"$cred_new"
+) || recover "aws-credentials.new の書き込み"
+new_secret=""
+chmod 0400 -- "$cred_new" || recover "aws-credentials.new の権限設定"
+
+# 手順 2: 新しいキー単体で検証する（IAM の反映遅延に備えて再試行）
+verified=0
+start=$SECONDS
+while :; do
+    arn=$(env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE="$cred_new" AWS_CONFIG_FILE=/dev/null \
+        AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 \
+        "$aws_bin" sts get-caller-identity --query Arn --output text 2>/dev/null) || arn=""
+    case "$arn" in
+        *:user/craftlatch-host)
+            verified=1
+            break
+            ;;
+    esac
+    [ $((SECONDS - start)) -ge "$verify_timeout" ] && break
+    sleep "$retry_sleep"
+done
+[ "$verified" -eq 1 ] || recover "新しいキーの検証(sts get-caller-identity)"
+
+# 手順 3: 定期実行を止め、実行中の poll の終了を待つ
+"$SYSTEMCTL" stop craftlatch-poll.timer || recover "craftlatch-poll.timer の停止"
+timer_stopped=1
+settled=0
+start=$SECONDS
+while :; do
+    state=$("$SYSTEMCTL" is-active craftlatch-poll.service 2>/dev/null) || true
+    case "$state" in
+        inactive)
+            settled=1
+            break
+            ;;
+        failed)
+            "$SYSTEMCTL" reset-failed craftlatch-poll.service || true
+            settled=1
+            break
+            ;;
+    esac
+    [ $((SECONDS - start)) -ge "$poll_wait_timeout" ] && break
+    sleep "$retry_sleep"
+done
+[ "$settled" -eq 1 ] || recover "実行中の craftlatch-poll.service の終了待ち（タイムアウト）"
+
+# 手順 4: 切り替え
+mv -- "$cred" "$cred_old" || recover "aws-credentials の退避"
+switched=1
+mv -- "$cred_new" "$cred" || recover "aws-credentials の切り替え"
+
+# 手順 5: 新しいキーで受信できることを確認する
+"$SYSTEMCTL" start craftlatch-poll.service || recover "新しいキーでの craftlatch-poll.service の実行"
+poll_succeeded || recover "新しいキーでの受信確認(poll-failures が 0 ではありません)"
+
+# 手順 6: ここが確定点。以降は新しいキーを削除しない
+finish_steps
