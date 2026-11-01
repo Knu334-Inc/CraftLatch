@@ -130,31 +130,151 @@ data "aws_iam_policy_document" "state_apply" {
 # plan ロール（PR での plan。読み取り専用）
 ################################################################################
 
+# 共有アカウントのため、読み取りも CraftLatch のリソースに限定する（他のシステムの Lambda の環境変数・コード、
+# IAM、キュー属性などを PR のコードから読めないようにする）。アクションは terraform plan の refresh と
+# data source がプロバイダー（hashicorp/aws v6.71）から呼ぶ読み取り API に限る。SQS のメッセージ受信は含まない。
 data "aws_iam_policy_document" "plan_read" {
-  # 管理対象サービスの Describe*・Get*・List* 系。SQS のメッセージ受信（sqs:ReceiveMessage）は含まない。
+  # aws_cognito_user_group・aws_cognito_user_pool_client・aws_cognito_managed_login_branding の読み取り。
+  # 対象は User Pool の ARN で、User Pool のタグで判定される。
   statement {
-    sid    = "PlanReadManagedServices"
+    sid    = "PlanReadTaggedUserPools"
     effect = "Allow"
     actions = [
-      "apigateway:GET",
-      "cognito-idp:Describe*",
-      "cognito-idp:Get*",
-      "cognito-idp:List*",
-      "iam:Get*",
-      "iam:List*",
-      "lambda:Get*",
-      "lambda:List*",
-      "logs:Describe*",
-      "logs:Get*",
-      "logs:List*",
-      "sqs:Get*",
-      "sqs:List*",
+      "cognito-idp:DescribeManagedLoginBranding",
+      "cognito-idp:DescribeManagedLoginBrandingByClient",
+      "cognito-idp:DescribeUserPoolClient",
+      "cognito-idp:GetGroup",
+      "cognito-idp:ListUserPoolClients",
+    ]
+    resources = ["arn:aws:cognito-idp:${var.region}:${local.account_id}:userpool/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = ["CraftLatch"]
+    }
+  }
+
+  # ListUserPools（data "aws_cognito_user_pools" の名前検索）と DescribeUserPoolDomain（ドメイン名だけを受け取る）は
+  # リソース種別を持たない（ARN で限定できない）ため * とする。User Pool の名前・ID とドメインの情報のみで、ユーザーは読めない。
+  statement {
+    sid    = "PlanCognitoUnscopedReads"
+    effect = "Allow"
+    actions = [
+      "cognito-idp:DescribeUserPoolDomain",
+      "cognito-idp:ListUserPools",
     ]
     resources = ["*"]
   }
 
+  # HTTP API とその配下（統合・ルート・ステージ）の GET。配下のリソースは API のタグで判定される。
+  statement {
+    sid       = "PlanReadTaggedApis"
+    effect    = "Allow"
+    actions   = ["apigateway:GET"]
+    resources = ["arn:aws:apigateway:${var.region}::/apis/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = ["CraftLatch"]
+    }
+  }
+
+  # タグの読み取り（GET /tags/<ARN>）。/tags は aws:ResourceTag に対応しないため名前・タグで限定できない。タグの読み取りのみ。
+  statement {
+    sid       = "PlanReadApiTags"
+    effect    = "Allow"
+    actions   = ["apigateway:GET"]
+    resources = ["arn:aws:apigateway:${var.region}::/tags/*"]
+  }
+
+  # aws_lambda_function（GetFunction・ListVersionsByFunction・GetFunctionCodeSigningConfig、タグ）と
+  # aws_lambda_permission（GetPolicy）の読み取り。
+  statement {
+    sid    = "PlanReadCraftlatchFunctions"
+    effect = "Allow"
+    actions = [
+      "lambda:GetFunction",
+      "lambda:GetFunctionCodeSigningConfig",
+      "lambda:GetPolicy",
+      "lambda:ListTags",
+      "lambda:ListVersionsByFunction",
+    ]
+    resources = ["arn:aws:lambda:${var.region}:${local.account_id}:function:craftlatch-*"]
+  }
+
+  # aws_sqs_queue・aws_sqs_queue_policy の読み取り（属性とタグ）。
+  statement {
+    sid    = "PlanReadGrantsQueue"
+    effect = "Allow"
+    actions = [
+      "sqs:GetQueueAttributes",
+      "sqs:ListQueueTags",
+    ]
+    resources = [local.grants_queue_arn]
+  }
+
+  # aws_cloudwatch_log_group のタグの読み取り。
+  statement {
+    sid       = "PlanReadCraftlatchLogGroups"
+    effect    = "Allow"
+    actions   = ["logs:ListTagsForResource"]
+    resources = ["arn:aws:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/craftlatch-*"]
+  }
+
+  # aws_cloudwatch_log_group の読み取りは DescribeLogGroups（名前の前方一致）で行う。
+  # DescribeLogGroups はリソース種別を持たない（ARN で限定できない）ため * とする。ロググループの名前・設定の一覧のみで、ログ本文は読めない。
+  statement {
+    sid       = "PlanDescribeLogGroups"
+    effect    = "Allow"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
+  }
+
+  # aws_iam_role・aws_iam_role_policy・aws_iam_user・aws_iam_user_policy の読み取り。
+  statement {
+    sid    = "PlanReadBoundedPrincipals"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:GetUser",
+      "iam:GetUserPolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRolePolicies",
+      "iam:ListRoleTags",
+      "iam:ListUserTags",
+    ]
+    resources = [
+      local.auth_role_arn,
+      local.host_user_arn,
+    ]
+  }
+
+  # data "aws_iam_policy" "boundary" の読み取り。GetPolicyVersion の対象はポリシーの ARN（バージョンを含む）。
+  statement {
+    sid    = "PlanReadBoundaryPolicy"
+    effect = "Allow"
+    actions = [
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyTags",
+    ]
+    resources = [aws_iam_policy.boundary.arn]
+  }
+
+  # name 指定の data "aws_iam_policy" は iam:ListPolicies で検索する。
+  # ListPolicies はリソース単位の制限に対応しない（リソース種別なし）ため * とする。ポリシーの一覧のみで、内容は読めない。
+  statement {
+    sid       = "PlanListPoliciesForBoundaryLookup"
+    effect    = "Allow"
+    actions   = ["iam:ListPolicies"]
+    resources = ["*"]
+  }
+
   # PR のコードから利用者名・IP（ログの本文、User Pool のユーザー一覧）を読めないようにする。
-  # plan には不要な操作で、上の Get*・List* に含まれるものだけを拒否する。
+  # plan には不要な操作で、上の許可には含まれないが、許可を広げたときの多層防御として拒否する。
   statement {
     sid    = "PlanDenyUserDataReads"
     effect = "Deny"
