@@ -21,7 +21,7 @@
 | バックアップ | DriveBackupV2 で取得済み（本設計の範囲外。自動停止との関係は 7.4 の注意点を参照） |
 | IPv6 | Ubuntu では無効（カーネル引数 `ipv6.disable=1`） |
 | UFW | 無効（`nftables.service` も無効）。ホストのフィルタは本設計の nftables テーブルのみ。Docker が稼働しており独自の iptables（nft バックエンド）ルールを持つが、本設計の専用テーブルとは独立 |
-| 既存起動方式 | `fuu62121`（sudo・docker グループ所属）で `screen` 経由で `paper-1.21.7-17.jar` を `-Xmx4G -Xms4G` で起動、`Restart=always`、enable 済み → 専用ユーザーへ移行する |
+| 既存起動方式 | 管理者の個人ユーザー（sudo・docker グループ所属）で `screen` 経由で `paper-1.21.7-17.jar` を `-Xmx4G -Xms4G` で起動、`Restart=always`、enable 済み → 専用ユーザーへ移行する |
 | サーバー | Ubuntu 24.04.5 LTS、カーネル 6.8、systemd 255、4 コア、メモリ 15 GiB（スワップなし）、OpenJDK 21、Python 3.12（boto3 未導入）、nftables 1.0.9、時刻同期済み |
 | ネットワーク | LAN: `enp3s0`、WireGuard: `wg0`（ピア 2 台）。本書の LAN・WireGuard のアドレスは例示用（RFC 5737）で、実際の値はサーバーの `/etc/craftlatch/config.json` にだけ置く。ルーターのポートフォワードは送信元を書き換えない（ログで確認済み） |
 | 既存の RCON 利用 | `whiteman.jar`（root で常駐、RCON でホワイトリストを管理）。CraftLatch と役割が重なるため廃止予定 |
@@ -1123,7 +1123,7 @@ sudo systemctl enable --now craftlatch-apply.path craftlatch-poll.timer
 sudo systemctl enable craftlatch-idle.timer
 ```
 
-既存ユニットは `/etc/systemd/system/minecraft.service`（`screen` 経由・`Restart=always`・`User=fuu62121`）であることを確認済み。`server.properties` の `enable-rcon=false`・`enforce-whitelist=true` への変更と、`paper.jar` シンボリックリンク（`paper-1.21.7-17.jar` を指す）の作成もこの段階で行う。古い jar（`paper-1.20.2-217.jar` 等）は移行後に整理してよい。
+既存ユニットは `/etc/systemd/system/minecraft.service`（`screen` 経由・`Restart=always`・`User=` は管理者の個人ユーザー）であることを確認済み。`server.properties` の `enable-rcon=false`・`enforce-whitelist=true` への変更と、`paper.jar` シンボリックリンク（`paper-1.21.7-17.jar` を指す）の作成もこの段階で行う。古い jar（`paper-1.20.2-217.jar` 等）は移行後に整理してよい。
 
 ---
 
