@@ -197,7 +197,7 @@ sudo chmod 0750 /media/ssd/paper
 
 続けて、Paper 側の設定を行います。
 
-- `server.properties`: `online-mode=true`、`white-list=true`、`enforce-whitelist=true`（変更）、`enable-rcon=false`（変更。25575 番が全インターフェースで待ち受けているため）、`enable-query=false`、`enable-status=true`（無人停止の判定に必要）、`server-port=25565`、`server-ip` は空。
+- `server.properties`: `online-mode=true`、`white-list=true`、`enforce-whitelist=true`（変更）、`enable-rcon=false`（変更。RCON のポートが全インターフェースで待ち受けているため）、`enable-query=false`、`enable-status=true`（無人停止の判定に必要）、`server-port=25565`、`server-ip` は空。
 - Geyser（`plugins/Geyser-Spigot/config.yml`）: `bedrock.port: 19132`、`bedrock.address: 0.0.0.0`、`remote.auth-type: floodgate`。
 - `/media/ssd/paper/paper.jar` を実体 jar（例 `paper-1.21.7-17.jar`）へのシンボリックリンクにする。
 
@@ -245,7 +245,7 @@ sudo host/install.sh
 - ルーターの MAC（`exclude_ether_saddr`）を検出して確認を求めます。内容を確認して `y` を入力してください（確認を省略するなら `--yes`）。自動で取得できない場合は、`config.json` の `exclude_ether_saddr` に手で入力して再実行します。
 - 雛形の `queue_url` は仮の値です。④で取得した値を `/etc/craftlatch/config.json` の `queue_url` に入力し、`install.sh` を再実行してください。値が不正だと nft ルールを生成できず、「queue_url を入力して再実行してください」と表示されて終了します（何も壊れません）。`sudoedit /etc/craftlatch/config.json` で編集します。
 - 事前検証（root、`minecraft` ユーザー、`python3-boto3`、`nft`、systemd 248 以上、`/media/ssd/paper`）に失敗すると、何も変更せずに終了します。表示された項目を直して再実行します。
-- `trusted_sources` の既定値は、`enp3s0` + `192.168.33.0/24`（ルーターの MAC を除外）と `wg0` + `10.0.0.0/24` です。環境が違う場合は、この段階で `config.json` を編集し、**`docs/operations.md` の「ルール変更」に従って fwcheck の雛形を取り直してください**（雛形と一致しないと Minecraft が起動しません）。
+- 雛形の `trusted_sources` は、`enp3s0`（ルーターの MAC を除外）と `wg0` の 2 件で、範囲（`cidr`）は例示用のアドレス（`192.0.2.0/24`・`198.51.100.0/24`）です。**`sudoedit /etc/craftlatch/config.json` で `cidr` を実際の LAN と WireGuard の範囲に書き換え、`install.sh` を再実行してください**（書き換えないと LAN と WireGuard からの接続が遮断されます）。範囲だけの変更なら fwcheck の雛形を取り直す必要はありません。インターフェース名・件数・MAC 除外の有無が違う場合は、`docs/operations.md` の「ルール変更」に従って雛形を取り直してください（雛形と一致しないと Minecraft が起動しません）。
 
 ### ユニットの有効化
 
@@ -279,7 +279,7 @@ sudo nft list set inet craftlatch allow4
 sudo wg show wg0 allowed-ips
 ```
 
-`trusted_sources` の `10.0.0.0/24` に含まれる IP だけが、WireGuard の許可 IP に載っていること。
+`trusted_sources` の `wg0` の範囲に含まれる IP だけが、WireGuard の許可 IP に載っていること。
 
 3. 外部回線からの遮断。認証していない回線（例: スマホのテザリング）から。
 
@@ -291,13 +291,13 @@ nc -vz -w 5 <グローバルIP> 25565
 
 4. 認証の通し確認。ログイン URL で認証し、1〜2 分後に同じ回線から `nc -vz -w 5 <グローバルIP> 25565` が接続でき、Minecraft（`systemctl status minecraft.service`）が起動していること。`sudo nft list set inet craftlatch allow4` にその IP が `expires` 付きで載ること。
 
-5. LAN からの接続（未検証事項 U13）。LAN 内の端末から接続先に `192.168.33.4` を指定して接続し、次のカウンタが増えること。
+5. LAN からの接続（未検証事項 U13）。LAN 内の端末から接続先にサーバーの LAN のアドレス（`<SERVER_LAN_IP>`）を指定して接続し、次のカウンタが増えること。
 
 ```
 sudo nft list chain inet craftlatch input
 ```
 
-LAN 用のルール（`iifname "enp3s0"` の行）のカウンタが増えていれば正常です。ヘアピン NAT 経由（グローバル IP やドメイン名を指定）で接続していた場合は、ルーターの MAC の除外条件により遮断されるため、接続先を `192.168.33.4` に変更してもらいます。
+LAN 用のルール（`iifname "enp3s0"` の行）のカウンタが増えていれば正常です。ヘアピン NAT 経由（グローバル IP やドメイン名を指定）で接続していた場合は、ルーターの MAC の除外条件により遮断されるため、接続先をサーバーの LAN のアドレスに変更してもらいます。
 
 6. 数分間プレイヤーがいない状態で、約 15 分後に Minecraft が自動停止すること（`journalctl -t craftlatch-idle --since today`）。
 7. 通知は、障害が起きたときに Discord に届きます（`docs/operations.md` の障害ケースの確認と合わせて、必要なら意図的に失敗させて確認してください）。

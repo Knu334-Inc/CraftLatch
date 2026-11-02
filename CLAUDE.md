@@ -23,6 +23,7 @@ Cognito でログインした人のグローバル IPv4 アドレスだけを、
 ## 公開リポジトリ
 
 - AWS アカウント ID・メールアドレス・API Gateway や SQS の URL・Cognito のドメインを、コード・ドキュメント・コミットメッセージ・PR・ログ出力に書かない。ドキュメントでは `<ACCOUNT_ID>` `<BUCKET>` `<POOL_ID>` などのプレースホルダーを使う
+- 自宅環境の値（LAN・WireGuard のアドレスと範囲、ルーターの MAC、SSH などのポート番号）も書かない。コード・テスト・雛形で例が必要なときは RFC 5737 の例示用アドレス（`192.0.2.0/24` など）と MAC `aa:bb:cc:dd:ee:ff` を使う。Minecraft の標準ポート（25565・19132）は書いてよい
 - 秘密情報（アクセスキー・Discord Webhook URL）はリポジトリにも Terraform state にも置かない。サーバーの `/etc/craftlatch/` にだけ置く
 - ドキュメントやコミットの前に混入を確認する: `grep -rnE '[0-9]{12}|amazonaws\.com/[0-9]|@gmail\.com|execute-api\.[a-z0-9-]+\.amazonaws\.com' README.md CLAUDE.md docs/`
 

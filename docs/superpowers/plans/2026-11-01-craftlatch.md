@@ -18,7 +18,7 @@
 - ホストの Python は `python3 -E -s` で起動（`-I` 禁止。同じディレクトリの `common.py` を import するため）。ホストの依存は標準ライブラリと apt の `python3-boto3` のみ。コードは Python 3.12 で動くこと。
 - Lambda は標準ライブラリ + ランタイム同梱 boto3 のみ（外部パッケージ禁止）。Python 3.13・arm64・128MB・10 秒。
 - 値: 許可期限 600 秒（`timeout 10m`）、無人停止 900 秒、stop 要求の有効期間 120 秒・再要求間隔 300 秒、`MAX_AUTH_AGE=120`、要求ファイル 1024 バイト以下、apply 1 回最大 100 件、SLP タイムアウト 3 秒・応答上限 65,536 バイト、poll 全体期限 35 秒、キー警告 335 日（設計書 5 章・4.3）。
-- ポート: Java TCP/25565、Bedrock UDP/19132。信頼する送信元は `enp3s0`+`192.168.33.0/24`（ルーター MAC 除外）と `wg0`+`10.0.0.0/24`。
+- ポート: Java TCP/25565、Bedrock UDP/19132。信頼する送信元は `enp3s0`+`192.0.2.0/24`（ルーター MAC 除外）と `wg0`+`198.51.100.0/24`。
 - 外部コマンドは `subprocess.run([...], shell=False, timeout=10)`。CLI の例示は 1 行で書く。
 - GitHub Actions の外部 Action はコミット SHA で固定。Terraform 本体・プロバイダーはバージョン固定し `.terraform.lock.hcl` をコミット。
 - コミットは各タスクの最後に行い、メッセージ末尾に `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` を付ける。
@@ -63,7 +63,7 @@
 
 ### Task 0: 本番サーバーでの事前検証（手動・管理者の sudo が必要）
 
-設計書 13 章の U1・U3・U6 と、fwcheck のテスト用フィクスチャの取得。サーバーへは `ssh -p 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4` で接続する。**sudo を伴うコマンドは管理者に実行を依頼し、結果を受け取る**（エージェントは sudo のパスワードを持たない）。既存の Minecraft には触れない。
+設計書 13 章の U1・U3・U6 と、fwcheck のテスト用フィクスチャの取得。サーバーへは `ssh agent@<サーバー>` で接続する。**sudo を伴うコマンドは管理者に実行を依頼し、結果を受け取る**（エージェントは sudo のパスワードを持たない）。既存の Minecraft には触れない。
 
 **Files:**
 - Create: `docs/superpowers/plans/2026-11-01-craftlatch-spike.md`（結果の記録）
@@ -71,7 +71,7 @@
 
 **どの確認も期待どおりでなければ、その時点で作業を止め、結果を管理者に報告して計画（関連するすべてのタスク）を改訂してから再開する。** 分岐のまま実装を続けない。
 
-- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `tests/host/fixtures/craftlatch-probe.nft` としてリポジトリに作る（Task 6 で生成器の出力と一致することを検査する）。同じ内容で `iif "lo" accept` の直後に `tcp dport 25565 accept` を 1 行挿入した `tests/host/fixtures/craftlatch-probe-bad.nft` も作る（Task 15 の fwcheck 試験用）。両方をサーバーの再起動でも消えない `~/craftlatch-probe/` に置く（`ssh -p 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4 mkdir -p craftlatch-probe && scp -P 3340 -i /workspace/.ssh/id_ed25519 tests/host/fixtures/craftlatch-probe*.nft agent@192.168.33.4:craftlatch-probe/`）。
+- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `tests/host/fixtures/craftlatch-probe.nft` としてリポジトリに作る（Task 6 で生成器の出力と一致することを検査する）。同じ内容で `iif "lo" accept` の直後に `tcp dport 25565 accept` を 1 行挿入した `tests/host/fixtures/craftlatch-probe-bad.nft` も作る（Task 15 の fwcheck 試験用）。両方をサーバーの再起動でも消えない `~/craftlatch-probe/` に置く（`ssh agent@<サーバー> mkdir -p craftlatch-probe && scp tests/host/fixtures/craftlatch-probe*.nft agent@<サーバー>:craftlatch-probe/`）。
 
 - [ ] **Step 2: U1 — `ipv6.disable=1` で `table inet` を読み込めるか（別のネットワーク名前空間で実施し、本番のルールに影響させない）**
 
@@ -79,7 +79,7 @@
 
 Expected: `rc=0` で、`/home/agent/craftlatch-probe/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
 
-- [ ] **Step 3: Step 2 の JSON を `host/lib/fwcheck-expected.json` として取得する**（`scp -P 3340 -i /workspace/.ssh/id_ed25519 agent@192.168.33.4:craftlatch-probe/nft_list_table.json host/lib/fwcheck-expected.json`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
+- [ ] **Step 3: Step 2 の JSON を `host/lib/fwcheck-expected.json` として取得する**（`scp agent@<サーバー>:craftlatch-probe/nft_list_table.json host/lib/fwcheck-expected.json`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
 
 - [ ] **Step 4: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（プラグインなしの一時サーバーで確認。jar は agent ユーザーでも読めるため sudo 不要）**
 
@@ -163,7 +163,7 @@ def test_valid_sqs_message():
 
 @pytest.mark.parametrize("patch", [
     {"v": True}, {"v": 2}, {"iat": True}, {"exp": now + 601}, {"exp": now},          # bool・TTL超過・期限切れ
-    {"iat": now + 61}, {"ip": "10.0.0.5"}, {"ip": "::1"}, {"ip": "203.000.113.5"},    # 未来・非グローバル・IPv6・非正規形
+    {"iat": now + 61}, {"ip": "172.16.0.5"}, {"ip": "::1"}, {"ip": "203.000.113.5"},    # 未来・非グローバル・IPv6・非正規形
     {"id": U.upper()}, {"user": "アリス"}, {"user": "a"*129}, {"extra": 1},            # 非正規 UUID・規則外・未知キー
 ])
 def test_invalid_sqs_message_rejected(patch): ...   # ValidationError
@@ -393,8 +393,8 @@ git commit -m "feat(host): SLP による無人検知と stop 要求を追加"
 def test_render_contains_rules_in_order(cfg):
     lines = [l.strip() for l in render_ruleset(cfg).splitlines()]
     i = lines.index('iif "lo" accept')
-    assert lines[i+1] == 'iifname "enp3s0" ether saddr != aa:bb:cc:dd:ee:ff ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept'
-    assert lines[i+2].startswith('iifname "wg0" ip saddr 10.0.0.0/24')
+    assert lines[i+1] == 'iifname "enp3s0" ether saddr != aa:bb:cc:dd:ee:ff ip saddr 192.0.2.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept'
+    assert lines[i+2].startswith('iifname "wg0" ip saddr 198.51.100.0/24')
     assert lines[-4:-2] == ["tcp dport 25565 counter drop", "udp dport 19132 counter drop"]
 def test_render_rejects_bad_iface_or_mac(cfg): ...      # iface に空白・引用符、MAC 形式違い → ValidationError
 def test_normalize_strips_volatile(fixture_json): ...   # handle・packets・bytes・elem が消える
@@ -409,11 +409,11 @@ def test_main_fails_closed_on_bad_config(tmp_path): ...  # Review Focus 2 → 1
 def test_main_fails_on_runner_error(): ...               # nft 失敗 → 1
 def test_expected_json_substitutes_mac_and_checks_sources(fixture_json, tmp_path):
     # 雛形の aa:bb:cc:dd:ee:ff が設定の MAC に置き換わり、雛形内に aa:bb:cc:dd:ee:ff が残らない
-    # trusted_sources の cidr を 192.168.34.0/24 に変えた設定 → ValidationError
+    # trusted_sources の cidr を 192.0.3.0/24 に変えた設定 → ValidationError
 def test_fwcheck_runs_only_nft_list(fixture_json): ...   # runner に渡されるコマンドは ["nft", "-j", "list", "table", "inet", "craftlatch"] の 1 回だけ（unshare を呼ばない）
 def test_neigh_parsing():
-    assert neigh_mac("192.168.33.1 dev enp3s0 lladdr aa:bb:cc:dd:ee:ff REACHABLE") == "aa:bb:cc:dd:ee:ff"
-    assert neigh_mac("192.168.33.1 dev enp3s0 INCOMPLETE") is None
+    assert neigh_mac("192.0.2.1 dev enp3s0 lladdr aa:bb:cc:dd:ee:ff REACHABLE") == "aa:bb:cc:dd:ee:ff"
+    assert neigh_mac("192.0.2.1 dev enp3s0 INCOMPLETE") is None
 def test_set_router_mac_does_not_overwrite(tmp_path): ...
 ```
 
@@ -579,7 +579,7 @@ def test_callback_state_mismatch_returns_relogin_page(): ...   # Review Focus 1�
     ({"cognito:username": "アリス"}, "account"),
 ])
 def test_claim_failures(claim_patch, kind): ...  # SQS 未送信
-def test_non_ipv4_or_private_source(): ...       # sourceIp "2001:db8::1" / "10.0.0.5" → not_ipv4 ページ、SQS 未送信
+def test_non_ipv4_or_private_source(): ...       # sourceIp "2001:db8::1" / "172.16.0.5" → not_ipv4 ページ、SQS 未送信
 def test_token_exchange_error_temporary(): ...   # urlopen が例外 → temporary
 def test_ignores_x_forwarded_for(): ...          # ヘッダーに別 IP があっても requestContext.http.sourceIp を使う
 def test_unknown_route_404(): ...
@@ -703,7 +703,7 @@ Task 14・15 の作業手順書になるため、構築より先に初版を作�
 
 - [ ] **Step 2: `docs/operations.md` を書く** — 設計書 9 章（日常運用、ローテーション、漏えい対応）、8 章の障害ケースごとの確認コマンド、ルール変更・ルーター交換（`install.sh --refresh-router-mac`）、Paper 更新、apply.path の復旧（`reset-failed`）。
 
-- [ ] **Step 3: `docs/user-guide.md` を書く** — 設計書 6.6 の制約を利用者向けの言葉で。ログイン URL は「管理者から共有」とし記載しない。LAN からは `192.168.33.4` を指定。
+- [ ] **Step 3: `docs/user-guide.md` を書く** — 設計書 6.6 の制約を利用者向けの言葉で。ログイン URL は「管理者から共有」とし記載しない。LAN からは `<サーバーの LAN アドレス>` を指定。
 
 - [ ] **Step 4: コミット**
 
@@ -782,7 +782,7 @@ Expected: どちらも接続できず、`sudo nft list chain inet craftlatch inp
   - fwcheck: 本番のテーブルは変更せず、別のネットワーク名前空間で確認する。ルーターの MAC を実際の値にした不正版を `sed 's/aa:bb:cc:dd:ee:ff/<実際のMAC>/' /home/agent/craftlatch-probe/craftlatch-probe-bad.nft > /home/agent/craftlatch-probe/bad-real.nft` で作り、`sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/bad-real.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0`（構文は正しく読み込めている）かつ `rc=1`。正常系は `sudo unshare --net sh -c 'nft -f /etc/craftlatch/craftlatch.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0` かつ `rc=0`。
   - 通知: `sudo systemctl start craftlatch-notify@test.service` で Discord に通知が届くこと。
 
-- [ ] **Step 7: LAN からの接続を確認する（U13）** — LAN の端末から `192.168.33.4` に接続でき、LAN ルールのカウンタが増える。
+- [ ] **Step 7: LAN からの接続を確認する（U13）** — LAN の端末から `<サーバーの LAN アドレス>` に接続でき、LAN ルールのカウンタが増える。
 
 - [ ] **Step 8: 結果を `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に追記してコミットする**
 
@@ -796,7 +796,7 @@ Expected: どちらも接続できず、`sudo nft list chain inet craftlatch inp
 - Modify: `README.md`（テンプレートの説明を置き換え）、`CLAUDE.md`（`AGENTS.md` はシンボリックリンクのまま）、`docs/setup.md`・`docs/operations.md`・`docs/user-guide.md`（Task 14・15 で判明した差分を反映）
 
 - [ ] **Step 1: `README.md` を書き換える** — 概要、設計書 3 章の Mermaid 全体構成図、ディレクトリ構成、各文書へのリンク。DevContainer テンプレートの説明は「開発環境」節に短く残す。
-- [ ] **Step 2: `CLAUDE.md` を書く** — プロジェクト概要、ディレクトリの役割、`uv run pytest`、CI での Terraform 検証、守るべき方針（Global Constraints の要点）、サーバーへの SSH は `-p 3340`・sudo は管理者が実行。
+- [ ] **Step 2: `CLAUDE.md` を書く** — プロジェクト概要、ディレクトリの役割、`uv run pytest`、CI での Terraform 検証、守るべき方針（Global Constraints の要点）、sudo は管理者が実行。
 - [ ] **Step 3: Task 14・15 の結果（未検証事項の結論、手順の修正点）を 3 つの文書と設計書 13 章に反映する**
 - [ ] **Step 4: リンク切れ・プレースホルダーの残り・公開すべきでない値の混入を確認する**
 
