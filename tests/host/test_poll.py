@@ -79,7 +79,7 @@ def test_valid_message_written_then_deleted(tmp_path):
 
 
 def test_invalid_message_deleted_without_file(tmp_path):
-    sqs = FakeSQS([[msg(b=body(ip="10.0.0.5"))]])
+    sqs = FakeSQS([[msg(b=body(ip="172.16.0.5"))]])
     r = run(sqs, tmp_path)
     assert r.invalid == 1 and r.written == 0 and r.deleted == 1 and r.failure is None
     assert list(tmp_path.iterdir()) == []

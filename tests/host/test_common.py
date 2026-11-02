@@ -36,8 +36,8 @@ VALID_CONFIG = {
     "slp_timeout_sec": 3,
     "key_warn_days": 335,
     "trusted_sources": [
-        {"iface": "enp3s0", "cidr": "192.168.33.0/24", "exclude_ether_saddr": "aa:bb:cc:dd:ee:ff"},
-        {"iface": "wg0", "cidr": "10.0.0.0/24"},
+        {"iface": "enp3s0", "cidr": "192.0.2.0/24", "exclude_ether_saddr": "aa:bb:cc:dd:ee:ff"},
+        {"iface": "wg0", "cidr": "198.51.100.0/24"},
     ],
 }
 
@@ -54,7 +54,7 @@ def test_valid_sqs_message():
 
 @pytest.mark.parametrize("patch", [
     {"v": True}, {"v": 2}, {"iat": True}, {"exp": now + 601}, {"exp": now},
-    {"iat": now + 61}, {"ip": "10.0.0.5"}, {"ip": "::1"}, {"ip": "203.000.113.5"},
+    {"iat": now + 61}, {"ip": "172.16.0.5"}, {"ip": "::1"}, {"ip": "203.000.113.5"},
     {"id": U.upper()}, {"user": "アリス"}, {"user": "a" * 129}, {"extra": 1},
     {"type": "stop"}, {"user": "alice\n"}, {"ip": 1},
 ])
@@ -145,7 +145,7 @@ def test_load_config_valid(tmp_path):
     lambda c: c.update(idle_stop_sec=0),
     lambda c: c.update(region="x"),
     lambda c: c.update(trusted_sources=[]),
-    lambda c: c["trusted_sources"][1].update(cidr="10.0.0.5/24"),
+    lambda c: c["trusted_sources"][1].update(cidr="198.51.100.5/24"),
     lambda c: c["trusted_sources"][1].update(extra=1),
     lambda c: c["trusted_sources"][1].pop("iface"),
 ])
@@ -161,9 +161,9 @@ def test_load_config_rejects_bad_values(tmp_path, mutate):
 
 def test_field_helpers():
     assert validate_iface("wg0") == "wg0"
-    assert validate_cidr("10.0.0.0/24") == "10.0.0.0/24"
+    assert validate_cidr("198.51.100.0/24") == "198.51.100.0/24"
     assert validate_mac("aa:bb:cc:dd:ee:ff") == "aa:bb:cc:dd:ee:ff"
-    for f, v in ((validate_iface, "a" * 16), (validate_iface, "a b"), (validate_cidr, "10.0.0.1/24"),
+    for f, v in ((validate_iface, "a" * 16), (validate_iface, "a b"), (validate_cidr, "198.51.100.1/24"),
                  (validate_mac, "AA:BB:CC:DD:EE:FF"), (validate_mac, "<x>")):
         with pytest.raises(ValidationError):
             f(v)

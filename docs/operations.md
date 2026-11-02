@@ -16,7 +16,7 @@
 | ファイアウォールの状態 | `systemctl status craftlatch-firewall.service` |
 | コンソールコマンド | `echo 'list' \| sudo -u minecraft tee /run/minecraft.console` |
 | 手動停止 | `sudo systemctl stop minecraft.service` |
-| 特定 IP の即時遮断 | `sudo nft delete element inet craftlatch allow4 { 203.0.113.5 }` |
+| 特定 IP の即時遮断 | `sudo nft delete element inet craftlatch allow4 { <IP> }` |
 
 - `counter drop` のカウンタが増えていれば遮断が効いています。`craftlatch-firewall.service` が `active (exited)` なら読み込み成功です。
 - 認証していない回線（例: スマホのテザリング）からの遮断確認: `nc -vz -w 5 <グローバルIP> 25565`。認証前はタイムアウトし、認証の 1〜2 分後に接続できれば正常です。
@@ -97,7 +97,7 @@ sudo systemctl status craftlatch-firewall.service
 ```
 
 - ルールが読み込まれていない、または余分・欠落・順序違いのルールがあると、fwcheck が失敗して起動しません（fail-closed）。
-- `config.json` の `trusted_sources`・ポート・許可期限を変えたのに雛形を取り直していない場合も失敗します（4 章）。
+- `config.json` の `trusted_sources` のインターフェース名・件数・MAC 除外の有無、ポート、許可期限を変えたのに雛形を取り直していない場合も失敗します（4 章）。範囲（`cidr`）は雛形と照合しません。
 - ルールを読み込み直す場合は `sudo systemctl restart craftlatch-firewall.service`（Minecraft の停止と許可リストの消去を伴います）。
 
 ## 3. アクセスキーのローテーション（365 日ごと、手動）
@@ -132,7 +132,9 @@ sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key --finish
 
 ## 4. ルールの変更（`trusted_sources`・ポート・許可期限）
 
-`config.json` の `trusted_sources`・`java_port`・`bedrock_port`・`grant_timeout_sec` を変えると、nft ルールが変わります。fwcheck の期待構造は `host/lib/fwcheck-expected.json`（インストール先は `/usr/local/lib/craftlatch/fwcheck-expected.json`）という雛形から組み立てるため、**雛形を取り直さないと fwcheck が設定と雛形の不一致で失敗し、Minecraft は起動しません**（fail-closed）。**順序が重要です。** 本番の `/etc/craftlatch/config.json` を先に編集すると、`install.sh` で新しい雛形を配置するまでの間、fwcheck が新しい設定と古い雛形を比較して失敗し、認証による Minecraft の起動がすべて失敗します（`StartLimitBurst` により 3 回で起動を諦めます）。そのため、本番の設定は**最後に**変更します。
+**範囲（`cidr`）だけを変える場合**は、雛形の取り直しは不要です。`sudoedit /etc/craftlatch/config.json` で `cidr` を変え、`sudo host/install.sh` で nft ルールを生成し直し、`sudo systemctl restart craftlatch-firewall.service` を実行します（Minecraft の停止と許可リストの消去を伴う。プレイヤーがいない時間に行う）。fwcheck は雛形の範囲を設定の範囲に置き換えて照合するため、雛形には例示用のアドレスだけを置きます。
+
+それ以外（`trusted_sources` のインターフェース名・件数・順序・MAC 除外の有無、`java_port`・`bedrock_port`・`grant_timeout_sec`）を変えると、nft ルールの構造が変わります。fwcheck の期待構造は `host/lib/fwcheck-expected.json`（インストール先は `/usr/local/lib/craftlatch/fwcheck-expected.json`）という雛形から組み立てるため、**雛形を取り直さないと fwcheck が設定と雛形の不一致で失敗し、Minecraft は起動しません**（fail-closed）。**順序が重要です。** 本番の `/etc/craftlatch/config.json` を先に編集すると、`install.sh` で新しい雛形を配置するまでの間、fwcheck が新しい設定と古い雛形を比較して失敗し、認証による Minecraft の起動がすべて失敗します（`StartLimitBurst` により 3 回で起動を諦めます）。そのため、本番の設定は**最後に**変更します。
 
 1. リポジトリのルートで、チェックアウトの外に作業用ディレクトリを作る（`queue_url` にアカウント ID が入る写しを、誤ってコミットしないため）。表示されたパスを以降の `<WORK>` に使う。
 
@@ -140,15 +142,15 @@ sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key --finish
 mktemp -d
 ```
 
-2. 現在の設定の写しを作り、ルーターの MAC だけをプレースホルダー `aa:bb:cc:dd:ee:ff` に置き換える（雛形に本物の MAC を残さないため）。
+2. 現在の設定の写しを作り、ルーターの MAC をプレースホルダー `aa:bb:cc:dd:ee:ff` に、範囲（`cidr`）をすべて例示用のアドレス `192.0.2.0/24` に置き換える（公開リポジトリの雛形に、本物の MAC と LAN・WireGuard の範囲を残さないため）。
 
 ```
-cp /etc/craftlatch/config.json <WORK>/config-template.json && sed -E -i 's/("exclude_ether_saddr": *")[^"]*"/\1aa:bb:cc:dd:ee:ff"/' <WORK>/config-template.json
+cp /etc/craftlatch/config.json <WORK>/config-template.json && sed -E -i -e 's/("exclude_ether_saddr": *")[^"]*"/\1aa:bb:cc:dd:ee:ff"/' -e 's#("cidr": *")[^"]*"#\1192.0.2.0/24"#g' <WORK>/config-template.json
 ```
 
-3. 写し（`<WORK>/config-template.json`）の `trusted_sources`・ポート・許可期限を、変更後の値に編集する。この時点では本番の設定は変えない。
+3. 写し（`<WORK>/config-template.json`）の `trusted_sources`・ポート・許可期限を、変更後の値に編集する。`trusted_sources` を追加する場合も、`cidr` は `192.0.2.0/24` にする。この時点では本番の設定は変えない。
 
-4. リポジトリのルートで、写しからルールファイルを生成する（`nftgen.py` は既定の設定パスしか読まないため、写しを読むようにモジュールを直接呼ぶ）。出力は MAC が `aa:bb:cc:dd:ee:ff` のルールになる。
+4. リポジトリのルートで、写しからルールファイルを生成する（`nftgen.py` は既定の設定パスしか読まないため、写しを読むようにモジュールを直接呼ぶ）。出力は MAC が `aa:bb:cc:dd:ee:ff`、範囲が `192.0.2.0/24` のルールになる。
 
 ```
 python3 -E -s -c 'import sys; sys.path.insert(0, "host/lib"); from pathlib import Path; from common import load_config; from nftgen import render_ruleset; sys.stdout.write(render_ruleset(load_config(Path(sys.argv[1]))))' <WORK>/config-template.json > <WORK>/template.nft
@@ -166,7 +168,7 @@ sudo unshare --net sh -c 'nft -f <WORK>/template.nft && nft -j list table inet c
 cp <WORK>/nft_list_table.json host/lib/fwcheck-expected.json
 ```
 
-7. `git diff` で内容（MAC が `aa:bb:cc:dd:ee:ff`、ポート、許可期限）を確認する。`<WORK>` の一時ファイルを削除する。`queue_url` を含む写しは絶対にコミットしない。
+7. `git diff` で内容（MAC が `aa:bb:cc:dd:ee:ff`、範囲が例示用のアドレス、ポート、許可期限）を確認する。`<WORK>` の一時ファイルを削除する。`queue_url` を含む写しは絶対にコミットしない。
 8. ブランチを作って雛形をコミットし、PR を作成して main にマージする（main は PR 経由のマージが必須です）。
 9. サーバー上のチェックアウトで `git pull` する。
 10. **ここで初めて**本番の設定を変更する（手順 11 と続けて行う）。`sudoedit /etc/craftlatch/config.json` で、手順 3 と同じ変更を加える（本物のルーター MAC は変えない）。

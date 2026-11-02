@@ -14,17 +14,17 @@ PROBE = Path(__file__).parent / "fixtures" / "craftlatch-probe.nft"
 def test_render_contains_rules_in_order(cfg):
     lines = [l.strip() for l in render_ruleset(cfg).splitlines()]
     i = lines.index('iif "lo" accept')
-    assert lines[i+1] == 'iifname "enp3s0" ether saddr != aa:bb:cc:dd:ee:ff ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept'
-    assert lines[i+2].startswith('iifname "wg0" ip saddr 10.0.0.0/24')
+    assert lines[i+1] == 'iifname "enp3s0" ether saddr != aa:bb:cc:dd:ee:ff ip saddr 192.0.2.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept'
+    assert lines[i+2].startswith('iifname "wg0" ip saddr 198.51.100.0/24')
     assert lines[-4:-2] == ["tcp dport 25565 counter drop", "udp dport 19132 counter drop"]
 
 
 @pytest.mark.parametrize("src", [
-    TrustedSource('en p0', "192.168.33.0/24", None),
-    TrustedSource('en"0', "192.168.33.0/24", None),
-    TrustedSource("enp3s0", "192.168.33.1/24", None),
-    TrustedSource("enp3s0", "192.168.33.0/24", "AA:BB:CC:DD:EE:FF"),
-    TrustedSource("enp3s0", "192.168.33.0/24", "<router-mac>"),
+    TrustedSource('en p0', "192.0.2.0/24", None),
+    TrustedSource('en"0', "192.0.2.0/24", None),
+    TrustedSource("enp3s0", "192.0.2.1/24", None),
+    TrustedSource("enp3s0", "192.0.2.0/24", "AA:BB:CC:DD:EE:FF"),
+    TrustedSource("enp3s0", "192.0.2.0/24", "<router-mac>"),
 ])
 def test_render_rejects_bad_iface_or_mac(cfg, src):
     bad = dataclasses.replace(cfg, trusted_sources=(src,))

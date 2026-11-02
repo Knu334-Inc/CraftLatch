@@ -11,8 +11,8 @@ table inet craftlatch {
   chain input {
     type filter hook input priority filter - 10; policy accept;
     iif "lo" accept
-    iifname "enp3s0" ether saddr != aa:bb:cc:dd:ee:ff ip saddr 192.168.33.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
-    iifname "wg0" ip saddr 10.0.0.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
+    iifname "enp3s0" ether saddr != aa:bb:cc:dd:ee:ff ip saddr 192.0.2.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
+    iifname "wg0" ip saddr 198.51.100.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
     tcp dport 25565 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
     udp dport 19132 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
     tcp dport 25565 counter drop
