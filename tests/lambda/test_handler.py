@@ -140,7 +140,7 @@ def test_claim_failures(ctx, patch, code):
     assert sqs.sent == []
 
 
-@pytest.mark.parametrize("ip", ["2001:db8::1", "10.0.0.5", "garbage", ""])
+@pytest.mark.parametrize("ip", ["2001:db8::1", "172.16.0.5", "garbage", ""])
 def test_non_ipv4_or_private_source(ctx, ip):
     sqs, _ = ctx
     r = handler.lambda_handler(callback_event(ip=ip), None)

@@ -3,6 +3,7 @@
 RestrictNamespaces=yes 下で動くため、名前空間は作らず nft -j list だけを実行する。
 """
 import copy
+import ipaddress
 import json
 import subprocess
 import sys
@@ -81,6 +82,22 @@ def _template_sources(rules: list[list]) -> list[tuple]:
     return out
 
 
+def _replace_cidrs(tpl: dict, cidrs: list[str]) -> dict:
+    """雛形の信頼する送信元の範囲（例示アドレス）を、設定の範囲に先頭から順に置き換える。"""
+    out = copy.deepcopy(tpl)
+    remaining = iter(cidrs)
+    for item in out["nftables"]:
+        expr = item.get("rule", {}).get("expr") if isinstance(item, dict) else None
+        if not expr or _match_of(expr, "meta", "iifname") is None:
+            continue
+        ip = _match_of(expr, "payload", ("ip", "saddr"))
+        if ip is None:
+            continue
+        net = ipaddress.IPv4Network(next(remaining))
+        ip["right"] = {"prefix": {"addr": str(net.network_address), "len": net.prefixlen}}
+    return out
+
+
 def _replace_mac(obj, mac: str):
     if isinstance(obj, str):
         return mac if obj == PLACEHOLDER_MAC else obj
@@ -99,9 +116,11 @@ def expected_json(cfg: Config, template_path: Path = TEMPLATE_PATH) -> dict:
     try:
         norm = normalize(tpl)
         rules = _rules(norm)
-        want = [(s.iface, s.cidr, s.exclude_ether_saddr is not None) for s in cfg.trusted_sources]
-        if _template_sources(rules) != want:
+        # 範囲は雛形では例示アドレスなので、インターフェース名・MAC 除外の有無・順序・件数だけを照合する
+        want = [(s.iface, s.exclude_ether_saddr is not None) for s in cfg.trusted_sources]
+        if [(iface, excl) for iface, _, excl in _template_sources(rules)] != want:
             raise ValidationError("trusted_sources が雛形と一致しません。雛形を取り直してください")
+        tpl = _replace_cidrs(tpl, [s.cidr for s in cfg.trusted_sources])
         sets = [i["set"] for i in norm if "set" in i]
         tpl_timeout = sets[0].get("timeout")
         tpl_java = _match_of(rules[-2], "payload", ("tcp", "dport"))["right"]

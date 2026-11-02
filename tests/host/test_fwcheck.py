@@ -1,4 +1,5 @@
 import copy
+import ipaddress
 import json
 import os
 import stat
@@ -121,16 +122,64 @@ def test_expected_json_substitutes_mac_and_checks_sources(fixture_json, cfg, tmp
     assert expected_json(cfg, TEMPLATE)["nftables"]
     new_mac = "11:22:33:44:55:66"
     cfg2 = type(cfg)(**{**cfg.__dict__, "trusted_sources": (
-        TrustedSource("enp3s0", "192.168.33.0/24", new_mac), cfg.trusted_sources[1])})
+        TrustedSource("enp3s0", "192.0.2.0/24", new_mac), cfg.trusted_sources[1])})
     text = json.dumps(expected_json(cfg2, TEMPLATE))
     assert new_mac in text and "aa:bb:cc:dd:ee:ff" not in text
-    bad = type(cfg)(**{**cfg.__dict__, "trusted_sources": (
-        TrustedSource("enp3s0", "192.168.34.0/24", "aa:bb:cc:dd:ee:ff"), cfg.trusted_sources[1])})
-    with pytest.raises(ValidationError):
-        expected_json(bad, TEMPLATE)
+    for bad_sources in (
+        (TrustedSource("eth9", "192.0.2.0/24", "aa:bb:cc:dd:ee:ff"), cfg.trusted_sources[1]),
+        (TrustedSource("enp3s0", "192.0.2.0/24", None), cfg.trusted_sources[1]),
+        (cfg.trusted_sources[0],),
+        (cfg.trusted_sources[1], cfg.trusted_sources[0]),
+    ):
+        with pytest.raises(ValidationError):
+            expected_json(type(cfg)(**{**cfg.__dict__, "trusted_sources": bad_sources}), TEMPLATE)
     for field, value in (("java_port", 25566), ("bedrock_port", 19133), ("grant_timeout_sec", 300)):
         with pytest.raises(ValidationError):
             expected_json(type(cfg)(**{**cfg.__dict__, field: value}), TEMPLATE)
+
+
+def _with_cidrs(cfg, lan, wg):
+    s = cfg.trusted_sources
+    return type(cfg)(**{**cfg.__dict__, "trusted_sources": (
+        TrustedSource(s[0].iface, lan, s[0].exclude_ether_saddr), TrustedSource(s[1].iface, wg, None))})
+
+
+def _saddr_prefixes(j):
+    out = []
+    for i in j["nftables"]:
+        for e in i.get("rule", {}).get("expr", []):
+            m = e.get("match", {})
+            if m.get("left", {}).get("payload", {}).get("field") == "saddr" \
+                    and m["left"]["payload"].get("protocol") == "ip" and isinstance(m["right"], dict):
+                out.append(m["right"])
+    return out
+
+
+def test_expected_json_substitutes_cidrs_in_order(cfg):
+    real = _with_cidrs(cfg, "172.16.0.0/16", "172.31.5.0/28")
+    assert _saddr_prefixes(expected_json(real, TEMPLATE)) == [
+        {"prefix": {"addr": "172.16.0.0", "len": 16}}, {"prefix": {"addr": "172.31.5.0", "len": 28}}]
+
+
+def test_template_holds_only_documentation_cidrs():
+    # 公開リポジトリの雛形に実際の LAN・WireGuard の範囲を置かない（例示用の RFC 5737 だけ）
+    docs = [ipaddress.IPv4Network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")]
+    prefixes = _saddr_prefixes(json.loads(TEMPLATE.read_text()))
+    assert prefixes
+    for p in prefixes:
+        net = ipaddress.IPv4Network(f"{p['prefix']['addr']}/{p['prefix']['len']}")
+        assert any(net.subnet_of(d) for d in docs), net
+
+
+def test_main_uses_config_cidrs_not_template_cidrs(fixture_json, cfg, env, monkeypatch):
+    real = _with_cidrs(cfg, "172.16.0.0/16", "172.31.5.0/28")
+    monkeypatch.setattr(fwcheck, "load_config", lambda: real)
+    live = expected_json(real, TEMPLATE)
+    monkeypatch.setattr(fwcheck, "RUN", _runner(live))
+    assert fwcheck.main([]) == 0
+    # 雛形の例示アドレスのままのルールは、設定と一致しないので失敗する
+    monkeypatch.setattr(fwcheck, "RUN", _runner(fixture_json))
+    assert fwcheck.main([]) == 1
 
 
 def test_expected_json_bad_template(cfg, tmp_path):
