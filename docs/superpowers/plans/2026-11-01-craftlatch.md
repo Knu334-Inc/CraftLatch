@@ -63,7 +63,7 @@
 
 ### Task 0: 本番サーバーでの事前検証（手動・管理者の sudo が必要）
 
-設計書 13 章の U1・U3・U6 と、fwcheck のテスト用フィクスチャの取得。サーバーへは `ssh agent@<サーバー>` で接続する。**sudo を伴うコマンドは管理者に実行を依頼し、結果を受け取る**（エージェントは sudo のパスワードを持たない）。既存の Minecraft には触れない。
+設計書 13 章の U1・U3・U6 と、fwcheck のテスト用フィクスチャの取得。サーバーへは `ssh <USER>@<サーバー>` で接続する。**sudo を伴うコマンドは管理者に実行を依頼し、結果を受け取る**（エージェントは sudo のパスワードを持たない）。既存の Minecraft には触れない。
 
 **Files:**
 - Create: `docs/superpowers/plans/2026-11-01-craftlatch-spike.md`（結果の記録）
@@ -71,19 +71,19 @@
 
 **どの確認も期待どおりでなければ、その時点で作業を止め、結果を管理者に報告して計画（関連するすべてのタスク）を改訂してから再開する。** 分岐のまま実装を続けない。
 
-- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `tests/host/fixtures/craftlatch-probe.nft` としてリポジトリに作る（Task 6 で生成器の出力と一致することを検査する）。同じ内容で `iif "lo" accept` の直後に `tcp dport 25565 accept` を 1 行挿入した `tests/host/fixtures/craftlatch-probe-bad.nft` も作る（Task 15 の fwcheck 試験用）。両方をサーバーの再起動でも消えない `~/craftlatch-probe/` に置く（`ssh agent@<サーバー> mkdir -p craftlatch-probe && scp tests/host/fixtures/craftlatch-probe*.nft agent@<サーバー>:craftlatch-probe/`）。
+- [ ] **Step 1: 検証用のルールファイルを用意する** — 設計書 6.1 のルール全文（`<ルーターのMAC>` は `aa:bb:cc:dd:ee:ff`）を `tests/host/fixtures/craftlatch-probe.nft` としてリポジトリに作る（Task 6 で生成器の出力と一致することを検査する）。同じ内容で `iif "lo" accept` の直後に `tcp dport 25565 accept` を 1 行挿入した `tests/host/fixtures/craftlatch-probe-bad.nft` も作る（Task 15 の fwcheck 試験用）。両方をサーバーの再起動でも消えない `~/craftlatch-probe/` に置く（`ssh <USER>@<サーバー> mkdir -p craftlatch-probe && scp tests/host/fixtures/craftlatch-probe*.nft <USER>@<サーバー>:craftlatch-probe/`）。
 
 - [ ] **Step 2: U1 — `ipv6.disable=1` で `table inet` を読み込めるか（別のネットワーク名前空間で実施し、本番のルールに影響させない）**
 
-管理者に依頼: `sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/craftlatch-probe.nft && nft -j list table inet craftlatch' > /home/agent/craftlatch-probe/nft_list_table.json; echo rc=$?`
+管理者に依頼: `sudo unshare --net sh -c 'nft -f <HOME>/craftlatch-probe/craftlatch-probe.nft && nft -j list table inet craftlatch' > <HOME>/craftlatch-probe/nft_list_table.json; echo rc=$?`
 
-Expected: `rc=0` で、`/home/agent/craftlatch-probe/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
+Expected: `rc=0` で、`<HOME>/craftlatch-probe/nft_list_table.json` に set `allow4` とチェイン `input` の全ルールが含まれる。失敗した場合は作業を止める（`table ip` への変更は、`nftgen`・`apply` の nft バッチ・`fwcheck`・各種確認コマンドに及ぶため、計画の改訂が必要）。
 
-- [ ] **Step 3: Step 2 の JSON を `host/lib/fwcheck-expected.json` として取得する**（`scp agent@<サーバー>:craftlatch-probe/nft_list_table.json host/lib/fwcheck-expected.json`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
+- [ ] **Step 3: Step 2 の JSON を `host/lib/fwcheck-expected.json` として取得する**（`scp <USER>@<サーバー>:craftlatch-probe/nft_list_table.json host/lib/fwcheck-expected.json`。完全なルールセットの、nftables 1.0.9 による出力であることを確認する）
 
-- [ ] **Step 4: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（プラグインなしの一時サーバーで確認。jar は agent ユーザーでも読めるため sudo 不要）**
+- [ ] **Step 4: U6 — Paper が FIFO の stdin からコマンドを受け付けるか（プラグインなしの一時サーバーで確認。jar は 作業用ユーザーでも読めるため sudo 不要）**
 
-Run（サーバー上、agent ユーザー、1 行）: `D=$(mktemp -d /tmp/craftlatch-probe.XXXXXX) && cd "$D" && printf 'eula=true\n' > eula.txt && printf 'server-ip=127.0.0.1\nserver-port=25599\nonline-mode=true\n' > server.properties && mkfifo console && (java -Xmx512M -jar /media/ssd/paper/paper-1.21.7-17.jar --nogui <> console > probe.log 2>&1 & echo $! > pid) && timeout 300 sh -c 'until grep -q "Done (" probe.log; do sleep 5; done' && timeout 5 sh -c 'printf "stop\n" > console' && timeout 120 sh -c 'while kill -0 "$(cat pid)" 2>/dev/null; do sleep 2; done'; grep -E "Stopping server|Saving worlds" probe.log; kill "$(cat pid)" 2>/dev/null; cd / && rm -rf "$D"`
+Run（サーバー上、作業用ユーザー、1 行）: `D=$(mktemp -d /tmp/craftlatch-probe.XXXXXX) && cd "$D" && printf 'eula=true\n' > eula.txt && printf 'server-ip=127.0.0.1\nserver-port=25599\nonline-mode=true\n' > server.properties && mkfifo console && (java -Xmx512M -jar /media/ssd/paper/paper-1.21.7-17.jar --nogui <> console > probe.log 2>&1 & echo $! > pid) && timeout 300 sh -c 'until grep -q "Done (" probe.log; do sleep 5; done' && timeout 5 sh -c 'printf "stop\n" > console' && timeout 120 sh -c 'while kill -0 "$(cat pid)" 2>/dev/null; do sleep 2; done'; grep -E "Stopping server|Saving worlds" probe.log; kill "$(cat pid)" 2>/dev/null; cd / && rm -rf "$D"`
 
 `server-ip=127.0.0.1` で localhost のみに待ち受け、外部に公開しない。`<>` で FIFO を読み書き両用で開くため、書き手がいなくてもブロックせず EOF にもならない（systemd のソケットと同じ状態）。起動待ち 300 秒・終了待ち 120 秒の上限を設け、最後に必ずプロセスを止めて作業ディレクトリを削除する。プラグイン込みの実構成での FIFO 停止は Task 15 Step 4 で別に確認する。
 
@@ -779,7 +779,7 @@ Expected: どちらも接続できず、`sudo nft list chain inet craftlatch inp
 - [ ] **Step 6: 異常系を確認する**
   - 停止処理中の認証（U3 の実機確認）。
   - 再起動による要求消失: 管理者が `sudo systemctl stop craftlatch-apply.path` で適用を止めた状態でログインし、`/run/craftlatch/requests/` に要求ファイルが置かれ SQS から削除されたことを確認 → OS を再起動 → 許可リストが空で Minecraft が自動起動しないこと → もう一度ログインすると正常に許可・起動されること。
-  - fwcheck: 本番のテーブルは変更せず、別のネットワーク名前空間で確認する。ルーターの MAC を実際の値にした不正版を `sed 's/aa:bb:cc:dd:ee:ff/<実際のMAC>/' /home/agent/craftlatch-probe/craftlatch-probe-bad.nft > /home/agent/craftlatch-probe/bad-real.nft` で作り、`sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/bad-real.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0`（構文は正しく読み込めている）かつ `rc=1`。正常系は `sudo unshare --net sh -c 'nft -f /etc/craftlatch/craftlatch.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0` かつ `rc=0`。
+  - fwcheck: 本番のテーブルは変更せず、別のネットワーク名前空間で確認する。ルーターの MAC を実際の値にした不正版を `sed 's/aa:bb:cc:dd:ee:ff/<実際のMAC>/' <HOME>/craftlatch-probe/craftlatch-probe-bad.nft > <HOME>/craftlatch-probe/bad-real.nft` で作り、`sudo unshare --net sh -c 'nft -f <HOME>/craftlatch-probe/bad-real.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0`（構文は正しく読み込めている）かつ `rc=1`。正常系は `sudo unshare --net sh -c 'nft -f /etc/craftlatch/craftlatch.nft; echo load=$?; /usr/local/lib/craftlatch/fwcheck; echo rc=$?'` → Expected: `load=0` かつ `rc=0`。
   - 通知: `sudo systemctl start craftlatch-notify@test.service` で Discord に通知が届くこと。
 
 - [ ] **Step 7: LAN からの接続を確認する（U13）** — LAN の端末から `<サーバーの LAN アドレス>` に接続でき、LAN ルールのカウンタが増える。

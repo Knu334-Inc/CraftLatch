@@ -24,7 +24,7 @@
 本番のルールに影響しないよう、別のネットワーク名前空間で実施した（管理者が sudo で実行）。
 
 ```
-sudo unshare --net sh -c 'nft -f /home/agent/craftlatch-probe/craftlatch-probe.nft && nft -j list table inet craftlatch' > /home/agent/craftlatch-probe/nft_list_table.json; echo rc=$?
+sudo unshare --net sh -c 'nft -f <HOME>/craftlatch-probe/craftlatch-probe.nft && nft -j list table inet craftlatch' > <HOME>/craftlatch-probe/nft_list_table.json; echo rc=$?
 rc=0
 ```
 
@@ -35,7 +35,7 @@ rc=0
 
 ## U6: FIFO 経由の停止
 
-agent ユーザーでプラグインなしの一時サーバーを起動して確認した。待ち受けは `127.0.0.1:25599` だけにし、作業ディレクトリは `/tmp` に作った。FIFO は `<>`（読み書き両用）で stdin に接続した。
+作業用ユーザーでプラグインなしの一時サーバーを起動して確認した。待ち受けは `127.0.0.1:25599` だけにし、作業ディレクトリは `/tmp` に作った。FIFO は `<>`（読み書き両用）で stdin に接続した。
 
 ```
 [05:43:31 INFO]: Done (29.687s)! For help, type "help"
