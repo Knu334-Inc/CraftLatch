@@ -8,7 +8,7 @@
 
 ## 1. 目的とスコープ
 
-自宅 Ubuntu サーバーで稼働する Minecraft サーバー（Paper + Geyser + Floodgate）について、Amazon Cognito による認証に成功したグローバル IPv4 アドレスからのみ Java 版（TCP/25565）・Bedrock 版（UDP/19132）へ到達できるようにする。あわせて認証をトリガーにサーバーを自動起動し、無人状態が続いたら正常停止する。
+自宅 Ubuntu サーバーで稼働する Minecraft サーバー（Paper + Geyser + Floodgate）について、Amazon Cognito による認証に成功したグローバル IPv4 アドレスからのみ Java 版（TCP/25565）・Bedrock 版（UDP/19132 と、接続の段取りに使う TCP/19132）へ到達できるようにする。あわせて認証をトリガーにサーバーを自動起動し、無人状態が続いたら正常停止する。
 
 重視する順序: セキュリティ ＞ AWS 利用料金 ＞ リソース消費 ＞ 運用負荷 ＞ 実装のシンプルさ。
 
@@ -17,7 +17,7 @@
 | 項目 | 内容 |
 |---|---|
 | サーバー | Paper（Java Edition）+ Geyser-Spigot + Floodgate + DriveBackupV2 + Multiverse 系。`/media/ssd/paper/` 配下（`/etc/fstab` による常時マウント） |
-| 公開ポート | ルーターで IPv4 の TCP/25565 と UDP/19132 をポートフォワード。グローバル IP は固定 |
+| 公開ポート | ルーターで IPv4 の TCP/25565、UDP/19132、TCP/19132 をポートフォワード。グローバル IP は固定 |
 | バックアップ | DriveBackupV2 で取得済み（本設計の範囲外。自動停止との関係は 7.4 の注意点を参照） |
 | IPv6 | Ubuntu では無効（カーネル引数 `ipv6.disable=1`） |
 | UFW | 無効（`nftables.service` も無効）。ホストのフィルタは本設計の nftables テーブルのみ。Docker が稼働しており独自の iptables（nft バックエンド）ルールを持つが、本設計の専用テーブルとは独立 |
@@ -56,7 +56,7 @@
 | P8 | sudo と `NoNewPrivileges` の両立不可 | 受信プロセスを堅牢化すると sudo が使えない | 要求ファイル + path unit + root の apply service に分離 |
 | P9 | Cognito のセッションで再認証が素通りになる | Managed Login のセッションクッキーで入力なし成功 | `prompt=login` + Lambda 側で `auth_time` を検証 |
 | P10 | 同一グローバル IP の共有者も到達できる | CGNAT・公衆 Wi-Fi・同居人 | ホワイトリスト + `online-mode` + Floodgate を本当のアカウント認可とする |
-| P11 | 「プラグイン原則不使用」と実環境の相違 | 実際は Paper + Geyser + Floodgate。Bedrock は UDP/19132 で、Geyser は直接接続のため TCP 接続として見えない | UDP/19132 も同じ許可リストで制御。人数取得は SLP（Paper の `players.online` に Bedrock も含まれる） |
+| P11 | 「プラグイン原則不使用」と実環境の相違 | 実際は Paper + Geyser + Floodgate。Bedrock は UDP/19132 で、Geyser は直接接続のため TCP 接続として見えない。統合版の新しい接続方式（NetherNet）では、先に TCP/19132 でシグナリングする（6.1） | UDP/19132 と TCP/19132 も同じ許可リストで制御。人数取得は SLP（Paper の `players.online` に Bedrock も含まれる） |
 | P12 | 既存サーバーが sudoers ユーザーで稼働 | Paper/Geyser の RCE がホスト全体の侵害に直結 | 専用ユーザー `minecraft`（nologin、sudo 不可）へ移行 |
 | P13 | ブラウザのプライバシー機能による IP ずれ | iCloud プライベートリレー・ブラウザの IP 保護・VPN 使用時は中継 IP が登録される | 利用者向け案内に記載し、完了ページに登録 IP を表示 |
 
@@ -137,7 +137,7 @@ flowchart TB
     apply --> state
     minecraft -- "ExecStop で stop を書き込み" --> fifo
     fifo -- "stdin" --> minecraft
-    player -- "TCP/25565・UDP/19132" --> nft
+    player -- "TCP/25565・UDP/19132・TCP/19132" --> nft
     nft -- "許可 IP のみ" --> minecraft
     onfail["各ユニットの OnFailure=<br/>poll・apply・apply.path・idle・firewall・minecraft"] -.-> notify
     notify -- "HTTPS" --> discord
@@ -863,8 +863,11 @@ table inet craftlatch {
     iif "lo" accept
     iifname "enp3s0" ether saddr != <ルーターのMAC> ip saddr 192.0.2.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
     iifname "wg0" ip saddr 198.51.100.0/24 meta l4proto { tcp, udp } th dport { 25565, 19132 } counter accept
+    udp dport 19132 ct direction reply counter accept
     tcp dport 25565 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
+    tcp dport 19132 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
     udp dport 19132 ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept
+    tcp dport 19132 counter drop
     tcp dport 25565 counter drop
     udp dport 19132 counter drop
   }
@@ -882,7 +885,10 @@ table inet craftlatch {
   - 取得時点でルーターになりすました ARP 応答があれば誤った MAC を記録しうるが、LAN 内に攻撃者がいる前提は本設計の範囲外とする（LAN は信頼する前提）。
 - WireGuard は、各ピアの `AllowedIPs` が自分のアドレスの `/32`（`198.51.100.2/32`、`198.51.100.3/32`）のみであることを前提とする（ピアが他の送信元を名乗れないようにするため）。`sudo wg show wg0 allowed-ips` で確認する（`docs/setup.md` の検証項目）。
 - ct state を見ずに drop するため、ESTABLISHED の接続でも未許可（失効後）であれば遮断される。**失効すると接続中のセッションもその時点で切れる。**
-- `inet` ファミリーのため、IPv6 が誤って有効化されても 25565・19132 は閉じたまま。
+- **統合版の接続方式（NetherNet）への対応**: Geyser 2.12 以降は、統合版の新しい接続方式（WebRTC 型）に対応している。統合版のクライアント（26.x 以降で確認）は、まず TCP/19132 の HTTP でシグナリングし（Geyser のログに `Built-in signaling started on http://0.0.0.0:19132`）、そのあと UDP/19132 でゲームの通信をする。そのため TCP/19132 も UDP/19132 と同じく許可リストで絞る（許可・延長・drop の 3 行）。LAN・WireGuard の許可は `meta l4proto { tcp, udp }` で両方を含む。
+  - Geyser は UDP/19132 から STUN サーバー（Cloudflare・Google）に問い合わせ、外から見た自分のアドレスを調べる（15 秒ごと）。その返事は送信元が許可リストにないため、`udp dport 19132 ct direction reply` で、**サーバーから始めた通信への返事だけ**を通す。これがないと Geyser が自宅のグローバル IP を知らず、外からの統合版の接続が成立しない（LAN からは成立するため気づきにくい）。
+  - この返事の許可は、サーバーが自分から送った相手との通信にだけ効く。相手は STUN サーバーと、シグナリング（許可リストで絞った TCP/19132）で候補を交換したクライアントに限られる。クライアントとの通信がサーバー側から始まった場合は、その通信が続く間（conntrack の UDP の期限内）は許可リストの期限が切れても遮断されない。シグナリングと、クライアントから始まる通信は、これまでどおり許可リストの期限で遮断される。
+- `inet` ファミリーのため、IPv6 が誤って有効化されても 25565・19132（TCP・UDP）は閉じたまま。
 - 25565・19132 以外のポートには関与しない（外部からはルーターで開けていないため到達しない）。ホスト全体のデフォルト拒否ポリシーは本設計の範囲外とし、別途検討を推奨する。
 - `update` 文は、パケットごとに要素の期限を設定値に戻す（nftables wiki「Updating sets from the packet path」）。`dynamic` フラグが必要。
 

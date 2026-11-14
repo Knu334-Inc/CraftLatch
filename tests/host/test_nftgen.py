@@ -19,6 +19,23 @@ def test_render_contains_rules_in_order(cfg):
     assert lines[-4:-2] == ["tcp dport 25565 counter drop", "udp dport 19132 counter drop"]
 
 
+def test_render_gates_bedrock_signaling_and_accepts_own_replies(cfg):
+    # 統合版（NetherNet）は TCP/19132 でシグナリングし、Geyser は UDP/19132 から STUN を送る
+    lines = [l.strip() for l in render_ruleset(cfg).splitlines()]
+    i = next(n for n, l in enumerate(lines) if l.startswith('iifname "wg0"'))
+    grant = "ip saddr @allow4 update @allow4 { ip saddr timeout 10m } counter accept"
+    assert lines[i+1:i+8] == [
+        "udp dport 19132 ct direction reply counter accept",
+        f"tcp dport 25565 {grant}",
+        f"tcp dport 19132 {grant}",
+        f"udp dport 19132 {grant}",
+        "tcp dport 19132 counter drop",
+        "tcp dport 25565 counter drop",
+        "udp dport 19132 counter drop",
+    ]
+    assert lines[i+8] == "}"
+
+
 @pytest.mark.parametrize("src", [
     TrustedSource('en p0', "192.0.2.0/24", None),
     TrustedSource('en"0', "192.0.2.0/24", None),

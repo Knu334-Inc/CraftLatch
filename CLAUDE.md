@@ -35,7 +35,7 @@ Cognito でログインした人のグローバル IPv4 アドレスだけを、
 - 外部コマンドは `subprocess.run([...], shell=False, timeout=10)` で呼ぶ
 - 要求ファイルの検証は poll・apply・idle で共通の `host/lib/common.py` にまとめる。apply は poll が検証済みでも必ず再検証する
 - 許可期限 600 秒・無人停止 900 秒・`MAX_AUTH_AGE=120` などの値は設計書 5 章・4.3 で決めたもの。変える場合は設計書と docs も合わせて直す
-- ポートは Java TCP/25565、Bedrock UDP/19132。LAN（`enp3s0`、ルーターの MAC は除外）と WireGuard（`wg0`）からの接続は認証なしで許可する
+- ポートは Java TCP/25565、Bedrock UDP/19132 と TCP/19132（NetherNet のシグナリング）。Geyser が UDP/19132 から送る STUN の返事は `ct direction reply` で通す。LAN（`enp3s0`、ルーターの MAC は除外）と WireGuard（`wg0`）からの接続は認証なしで許可する
 
 ## インフラの約束
 
