@@ -8,8 +8,6 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "anthropic.claude-code",
-        "eamodio.gitlens",
         "ms-ceintl.vscode-language-pack-ja",
         "esbenp.prettier-vscode"
       ],
