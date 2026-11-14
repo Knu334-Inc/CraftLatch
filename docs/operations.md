@@ -100,6 +100,13 @@ sudo systemctl status craftlatch-firewall.service
 - `config.json` の `trusted_sources` のインターフェース名・件数・MAC 除外の有無、ポート、許可期限を変えたのに雛形を取り直していない場合も失敗します（4 章）。範囲（`cidr`）は雛形と照合しません。
 - ルールを読み込み直す場合は `sudo systemctl restart craftlatch-firewall.service`（Minecraft の停止と許可リストの消去を伴います）。
 
+外から接続できないときは、次の順に確認します。
+
+- 許可リストにその人の IP が載っているか（`sudo nft list set inet craftlatch allow4`）。載っていなければ再認証してもらう。モバイル回線では、ログインした IP とゲームの通信の IP が違うことがある（設計書 6.6）。
+- `sudo nft list chain inet craftlatch input` の各行のカウンタ。`@allow4` の行が増えずに `counter drop` だけ増えるなら、許可リストにない IP から届いている。
+- 既存の iptables のカウンタ（`sudo iptables -L INPUT -v -n --line-numbers`）。CraftLatch で許可しても、別のテーブルで捨てられると届かない（`docs/setup.md` ⑥ の事前準備）。
+- 統合版だけつながらない場合: サーバーで `sudo tcpdump -ni enp3s0 'host <相手のIP>'` を実行して接続してもらう。TCP 19132 が届いていなければ、ルーターの転送か既存のファイアウォールで TCP 19132 が止まっている。Geyser のログに `STUN discovery has had no answer` が続く場合は、STUN の返事が捨てられている（CraftLatch のルールが古い。`install.sh` を再実行する）。
+
 ## 3. アクセスキーのローテーション（365 日ごと、手動）
 
 `craftlatch-host` のアクセスキーを入れ替えます。335 日経過すると poll が警告を出します。サーバー再構築、ディスクの交換・廃棄、バックアップ流出の疑い、管理者 PC の不審があるときは、期限に関係なく更新します。
@@ -245,7 +252,7 @@ sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 プラグイン（Geyser・Floodgate・Multiverse・DriveBackupV2 など）:
 
 - 停止した状態で `/media/ssd/paper/plugins/` の jar を差し替える。ファイルの所有者は `minecraft` にする。
-- Geyser の設定: `bedrock.port: 19132`、`bedrock.address: 0.0.0.0`、`remote.auth-type: floodgate`。ポートを変える場合は 4 章の手順も必要。
+- Geyser の設定: `bedrock.port: 19132`、`bedrock.address: 0.0.0.0`、`remote.auth-type: floodgate`。ポートを変える場合は 4 章の手順も必要。統合版の新しい接続方式（Geyser 2.12 以降）は、同じ番号の TCP（シグナリング）も使う。CraftLatch は `bedrock_port` の TCP と UDP の両方を許可リストで絞り、ルーターでも両方を転送する。
 - DriveBackupV2 は、サーバーの稼働中にしか動かない。稼働時間が短いと定期バックアップの時刻に一度も稼働しないことがあるため、間隔（例: 稼働中 60 分ごと）やプレイヤーの参加・退出時のバックアップを確認する（未検証事項 U12）。無人停止の際にアップロード中だと `stop` で中断されうる。
 
 ## 9. インフラ（Terraform）の変更

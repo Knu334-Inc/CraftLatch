@@ -182,6 +182,27 @@ def test_main_uses_config_cidrs_not_template_cidrs(fixture_json, cfg, env, monke
     assert fwcheck.main([]) == 1
 
 
+def _dport(proto, port):
+    return {"match": {"op": "==", "left": {"payload": {"protocol": proto, "field": "dport"}}, "right": port}}
+
+
+def test_template_gates_bedrock_signaling_and_accepts_own_replies():
+    # nftgen が生成するルール（tests/test_nftgen.py）と同じ並びであること
+    rules = [i["rule"]["expr"] for i in normalize(json.loads(TEMPLATE.read_text())) if "rule" in i]
+    allow = {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": "@allow4"}}
+    reply = {"match": {"op": "==", "left": {"ct": {"key": "direction"}}, "right": "reply"}}
+    tail = rules[-7:]
+    assert tail[0] == [_dport("udp", 19132), reply, {"counter": {}}, {"accept": None}]
+    assert [(r[0], allow in r, r[-1]) for r in tail[1:]] == [
+        (_dport("tcp", 25565), True, {"accept": None}),
+        (_dport("tcp", 19132), True, {"accept": None}),
+        (_dport("udp", 19132), True, {"accept": None}),
+        (_dport("tcp", 19132), False, {"drop": None}),
+        (_dport("tcp", 25565), False, {"drop": None}),
+        (_dport("udp", 19132), False, {"drop": None}),
+    ]
+
+
 def test_expected_json_bad_template(cfg, tmp_path):
     with pytest.raises(ValidationError):
         expected_json(cfg, tmp_path / "missing.json")

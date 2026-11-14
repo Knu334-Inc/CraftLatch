@@ -49,8 +49,13 @@ def render_ruleset(cfg: Config) -> str:
         "    type filter hook input priority filter - 10; policy accept;\n"
         '    iif "lo" accept\n'
         + "".join(src_lines)
-        + f"    tcp dport {java} ip saddr @allow4 update @allow4 {{ ip saddr timeout {timeout} }} counter accept\n"
+        # Geyser が UDP/bedrock から送った STUN への返事（サーバーから始めた通信の返事だけ）
+        + f"    udp dport {bedrock} ct direction reply counter accept\n"
+        f"    tcp dport {java} ip saddr @allow4 update @allow4 {{ ip saddr timeout {timeout} }} counter accept\n"
+        # 統合版（NetherNet）のシグナリングは TCP/bedrock
+        f"    tcp dport {bedrock} ip saddr @allow4 update @allow4 {{ ip saddr timeout {timeout} }} counter accept\n"
         f"    udp dport {bedrock} ip saddr @allow4 update @allow4 {{ ip saddr timeout {timeout} }} counter accept\n"
+        f"    tcp dport {bedrock} counter drop\n"
         f"    tcp dport {java} counter drop\n"
         f"    udp dport {bedrock} counter drop\n"
         "  }\n"
