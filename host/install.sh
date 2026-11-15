@@ -46,9 +46,49 @@ owner_args=()
 
 umask 022
 
+# 配置先とその親ディレクトリが、所有者（本番は root）以外に書き換えられないことを確かめる。
+# 書き換えられると、root が実行するファイル（fwcheck・apply など）を差し替えられるため。
+# 親は接頭辞（本番は /）までたどる。存在しないディレクトリは飛ばす（install が 0755 で作る）。
+expect_uid=0
+if [ "$test_mode" -eq 1 ]; then
+    expect_uid="${CRAFTLATCH_EXPECT_UID:-$(id -u)}"
+fi
+unsafe_dirs=()
+check_install_dirs() {
+    local d stop="${root:-/}" info uid mode u
+    for d in "$@"; do
+        while :; do
+            if [ -d "$d" ]; then
+                if ! info=$(stat -L -c '%u %a' -- "$d" 2>/dev/null); then
+                    unsafe_dirs+=("$d（状態を取得できません）")
+                else
+                    uid=${info%% *}
+                    mode=${info#* }
+                    if [ "$uid" != "$expect_uid" ] || [ $(( 8#$mode & 8#022 )) -ne 0 ]; then
+                        local entry="$d（所有者 $uid、権限 $mode）" dup=0
+                        for u in ${unsafe_dirs[@]+"${unsafe_dirs[@]}"}; do
+                            [ "$u" = "$entry" ] && dup=1
+                        done
+                        [ "$dup" -eq 1 ] || unsafe_dirs+=("$entry")
+                    fi
+                fi
+            fi
+            if [ "$d" = "$stop" ] || [ "$d" = "/" ]; then
+                break
+            fi
+            d=$(dirname -- "$d")
+        done
+    done
+}
+check_install_dirs "$lib_dir" "$unit_dir" "$tmpfiles_dir" "$etc_dir"
+dir_failures=()
+for u in ${unsafe_dirs[@]+"${unsafe_dirs[@]}"}; do
+    dir_failures+=("所有者が root でないか、グループ・その他が書き込めるディレクトリがあります: $u")
+done
+
 # ---- 事前検証（何も変更する前に、失敗をすべて表示する） ----
 if [ "$test_mode" -eq 0 ]; then
-    failures=()
+    failures=(${dir_failures[@]+"${dir_failures[@]}"})
     [ "$EUID" -eq 0 ] || failures+=("root で実行してください（sudo host/install.sh）")
     getent passwd minecraft >/dev/null 2>&1 \
         || failures+=("minecraft ユーザーがありません（設計書 7.6 の移行手順を先に実施）")
@@ -68,7 +108,12 @@ if [ "$test_mode" -eq 0 ]; then
         exit 1
     fi
 else
-    echo "[テストモード] CRAFTLATCH_ROOT=$root: 事前検証は行いません"
+    echo "[テストモード] CRAFTLATCH_ROOT=$root: 事前検証はディレクトリの所有者と権限だけ行います"
+    if [ "${#dir_failures[@]}" -gt 0 ]; then
+        echo "事前検証に失敗しました。何も変更していません。" >&2
+        printf '  - %s\n' "${dir_failures[@]}" >&2
+        exit 1
+    fi
 fi
 
 # ---- craftlatch ユーザー ----

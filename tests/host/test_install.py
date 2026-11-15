@@ -148,3 +148,29 @@ def test_preflight_fails_without_changes_when_not_root(tmp_path):
     assert r.returncode == 1
     assert "root で実行" in r.stderr
     assert "何も変更していません" in r.stderr
+
+
+@pytest.mark.parametrize("rel, mode", [("usr/local/lib", 0o775), ("etc/systemd", 0o757),
+                                       ("usr/local/lib/craftlatch", 0o2775)])
+def test_preflight_rejects_writable_install_dirs(env, rel, mode):
+    # root が実行するファイルの置き場所とその親は、所有者以外に書き換えられてはならない
+    e, root, log = env
+    d = root / rel
+    d.mkdir(parents=True)
+    d.chmod(mode)
+    r = run(e)
+    assert r.returncode == 1
+    assert "何も変更していません" in r.stderr
+    assert f"{root}/{rel}" in r.stderr
+    assert not (root / "etc" / "craftlatch").exists()
+    assert not (root / "usr" / "local" / "lib" / "craftlatch" / "common.py").exists()
+
+
+def test_preflight_rejects_dirs_owned_by_others(env, monkeypatch):
+    # 所有者の確認: テストモードでは実行ユーザー以外の所有を拒否する（本番では root 以外）
+    e, root, log = env
+    (root / "etc").mkdir(parents=True)
+    e["CRAFTLATCH_EXPECT_UID"] = str(os.getuid() + 1)
+    r = run(e)
+    assert r.returncode == 1
+    assert f"{root}/etc" in r.stderr

@@ -270,7 +270,7 @@ sudo host/install.sh
 - 初回は `/etc/craftlatch/config.json` を雛形（`host/config.json.example`）から作成します。既存の `config.json`・`aws-credentials`・`discord-webhook` は上書きしません。
 - ルーターの MAC（`exclude_ether_saddr`）を検出して確認を求めます。内容を確認して `y` を入力してください（確認を省略するなら `--yes`）。自動で取得できない場合は、`config.json` の `exclude_ether_saddr` に手で入力して再実行します。
 - 雛形の `queue_url` は仮の値です。④で取得した値を `/etc/craftlatch/config.json` の `queue_url` に入力し、`install.sh` を再実行してください。値が不正だと nft ルールを生成できず、「queue_url を入力して再実行してください」と表示されて終了します（何も壊れません）。`sudoedit /etc/craftlatch/config.json` で編集します。
-- 事前検証（root、`minecraft` ユーザー、`python3-boto3`、`nft`、systemd 248 以上、`/media/ssd/paper`）に失敗すると、何も変更せずに終了します。表示された項目を直して再実行します。
+- 事前検証（root、`minecraft` ユーザー、`python3-boto3`、`nft`、systemd 248 以上、`/media/ssd/paper`、配置先とその親ディレクトリが root の所有でグループ・その他が書き込めないこと）に失敗すると、何も変更せずに終了します。表示された項目を直して再実行します。ディレクトリの所有者や権限で失敗した場合は、そのディレクトリを `sudo chown root:root <dir>` と `sudo chmod go-w <dir>` で直します（中のファイルも同じ状態のことがあるので、`sudo find <dir> -xdev ! -uid 0` などで確認します）。
 - 雛形の `trusted_sources` は、`enp3s0`（ルーターの MAC を除外）と `wg0` の 2 件で、範囲（`cidr`）は例示用のアドレス（`192.0.2.0/24`・`198.51.100.0/24`）です。**`sudoedit /etc/craftlatch/config.json` で `cidr` を実際の LAN と WireGuard の範囲に書き換え、`install.sh` を再実行してください**（書き換えないと LAN と WireGuard からの接続が遮断されます）。範囲だけの変更なら fwcheck の雛形を取り直す必要はありません。インターフェース名・件数・MAC 除外の有無が違う場合は、`docs/operations.md` の「ルール変更」に従って雛形を取り直してください（雛形と一致しないと Minecraft が起動しません）。
 
 ### ユニットの有効化
