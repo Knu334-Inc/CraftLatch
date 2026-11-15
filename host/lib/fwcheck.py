@@ -191,7 +191,7 @@ def _first_diff(a: list, b: list) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if "--import-check" in argv:
+    if argv == ["--import-check"]:
         print("import-ok")
         return 0
     try:
