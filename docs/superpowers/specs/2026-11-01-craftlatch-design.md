@@ -500,7 +500,7 @@ AWS アカウントは他のシステムと共有する前提とする。名前�
 | 担当 | 内容 |
 |---|---|
 | 初期構築（手順書。管理者が実行） | `minecraft` ユーザーへの移行（7.6）、依存パッケージの導入（`sudo apt install python3-boto3 nftables`）、アクセスキーと Webhook URL の配置（5.2 の所有者・権限で） |
-| `install.sh` の事前検証 | root で実行されていること、`minecraft` ユーザーの存在、`python3`・`python3-boto3`・`nft` の存在、systemd 248 以上、`/media/ssd/paper` の存在を確認し、満たさなければ何も変更せずに終了する |
+| `install.sh` の事前検証 | root で実行されていること、`minecraft` ユーザーの存在、`python3`・`python3-boto3`・`nft` の存在、systemd 248 以上、`/media/ssd/paper` の存在、配置先（`/usr/local/lib/craftlatch`・`/etc/systemd/system`・`/etc/tmpfiles.d`・`/etc/craftlatch`）とその親ディレクトリが root の所有でグループ・その他が書き込めないこと（root が実行するファイルを差し替えられないため）を確認し、満たさなければ何も変更せずに終了する |
 | `install.sh` の処理 | `craftlatch` ユーザーがなければ作成する（5.1）。スクリプト・ユニット・nft ルール・tmpfiles.d を 5.2 の所有者・権限で配置する。`config.json` は存在しない場合のみ雛形から作成する（既存の設定・秘密ファイル（`aws-credentials`・`discord-webhook`）は上書きしない）。ルーターの MAC（`exclude_ether_saddr`）が未設定なら検出・確認のうえ補完する（6.1）。`config.json` の `trusted_sources` から nft ルールファイルを生成する。`systemd-tmpfiles --create` と `systemctl daemon-reload` を実行する |
 | `install.sh` の更新時の案内 | 稼働中のユニットは自動では再起動しない。変更されたファイルの種類に応じて、実行すべきコマンドを**順序付きで**表示する。Python スクリプトのみの変更: 次回の実行から反映されるため操作不要。ユニットファイルの変更: 表示された各ユニットの `systemctl restart`（timer・path は該当ユニット）。nft ルールの変更: `sudo systemctl restart craftlatch-firewall.service`（Minecraft の停止と許可リストの消去を伴う旨を併記） |
 
