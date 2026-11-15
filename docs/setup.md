@@ -176,16 +176,17 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <POOL_ID> --username <NAM
 sudo apt install python3-boto3 nftables
 ```
 
-4. サーバーに AWS CLI v2 を導入する（初回のアクセスキー発行とキーのローテーションで使います。Ubuntu 24.04 には apt の `awscli` パッケージがないため snap を使います）。
+4. サーバーに AWS CLI v2 を導入する（キーの動作確認とローテーションで使います）。apt に `awscli` パッケージがないため、snap か公式のインストーラーを使います。公式のインストーラーで `~/.local` に入れた場合、`sudo` の下では `PATH` に入らないため、スクリプトには `AWS_CLI=<aws のフルパス>` で場所を渡します（`docs/operations.md` 3 章）。
 
 ```
 sudo snap install aws-cli --classic
 ```
 
 5. サーバー上の管理者用の AWS 認証情報は、**一時的なもの（SSO や短期間のプロファイル）だけ**を使い、作業が終わったら削除してください（`aws sso logout`、または `~/.aws` の該当プロファイルの削除）。キー作成の権限をサーバーに残さないためです（設計書 9.1）。長期のアクセスキーをサーバーに置かないでください。
-6. **本番サーバーで確認すること:** `sudo` 下で管理者のプロファイルが読めるか（`sudo` は `HOME` を `/root` に変えるため）。ローテーションの手順は `docs/operations.md` 3 章を参照してください。
+6. **管理者の MFA がパスキーの場合、CLI からはロールを引き受けられません**（パスキーは CLI の MFA に使えないため）。その場合は、サーバーに管理者の認証情報を置かず、コンソールの CloudShell でキーを発行して、サーバーの入力待ちに貼り付けます（下の「アクセスキーと Webhook の配置」）。ローテーションも同じ方法で行います（`docs/operations.md` 3 章）。
 7. ルーターのポート転送を、**TCP 25565・UDP 19132・TCP 19132** の 3 つともサーバーに向ける。統合版の新しい接続方式（Geyser 2.12 以降）は、先に TCP 19132 で接続の段取り（シグナリング）をしてから、UDP 19132 でゲームの通信をします。TCP 19132 がないと、LAN からはつながるのに外からは `InitialConnection` 系のエラーでつながりません。
-8. サーバーに既存のファイアウォール（iptables・ufw など）がある場合は、上の 3 つへの**新しい接続を、回数の制限なしで通す**ようにする。CraftLatch のルール（`inet craftlatch`）で許可しても、別のテーブルで捨てられると届きません。許可する相手の絞り込みは CraftLatch が行うので、既存のファイアウォール側では送信元を絞らずに通してかまいません。既存のルールは、`sudo iptables -L INPUT -v -n --line-numbers` で確認できます。
+8. サーバーに既存のファイアウォール（iptables・ufw など）がある場合は、上の 3 つへの**新しい接続を、回数の制限なしで通す**ようにする。CraftLatch のルール（`inet craftlatch`）で許可しても、別のテーブルで捨てられると届きません。許可する相手の絞り込みは CraftLatch が行うので、既存のファイアウォール側では送信元を絞らずに通してかまいません。既存のルールは、`sudo iptables -L INPUT -v -n --line-numbers` で確認できます。既存の iptables のルールを書き換えたときは、保存しているファイル（`/etc/iptables/rules.v4` など）も同じように直してください。ただし、そのファイルを丸ごと読み込み直すと Docker のルールが消えるので、今動いているルールは `iptables` コマンドで 1 行ずつ直します。
+9. `nftables.service` を有効にしない。Ubuntu の `/etc/nftables.conf` は先頭で `flush ruleset` を実行するため、このサービスが動くと CraftLatch のルール（と Docker のルール）が消えます。CraftLatch のルールは `craftlatch-firewall.service` が読み込みます（`systemctl is-enabled nftables.service` が `disabled` であることを確認します）。
 
 ### 既存環境からの移行
 
@@ -200,42 +201,65 @@ sudo chmod 0750 /media/ssd/paper
 続けて、Paper 側の設定を行います。
 
 - `server.properties`: `online-mode=true`、`white-list=true`、`enforce-whitelist=true`（変更）、`enable-rcon=false`（変更。RCON のポートが全インターフェースで待ち受けているため）、`enable-query=false`、`enable-status=true`（無人停止の判定に必要）、`server-port=25565`、`server-ip` は空。
-- Geyser（`plugins/Geyser-Spigot/config.yml`）: `bedrock.port: 19132`、`bedrock.address: 0.0.0.0`、`remote.auth-type: floodgate`。
+- Geyser（`plugins/Geyser-Spigot/config.yml`）: `bedrock.port: 19132`、`bedrock.address: 0.0.0.0`。`remote.auth-type` は既存の値のままにします（本番は `online` で運用しています）。
 - `/media/ssd/paper/paper.jar` を実体 jar（例 `paper-1.21.7-17.jar`）へのシンボリックリンクにする。
 
 ```
 sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 ```
 
+- Java の版: Minecraft 26.1 以降の Paper は **Java 25 以上**が必要です（足りないと起動直後に「requires running the server with Java 25 or above」で失敗します）。`minecraft.service` は `/usr/bin/java`（既定の Java）を使います。既定の Java を変えずに版を固定したい場合は、ドロップインで `ExecStart` を上書きします。ドロップインは `install.sh` がユニットを置き換えても残るので、Java を更新したときは忘れずに直してください。
+
+```
+sudo mkdir -p /etc/systemd/system/minecraft.service.d && printf '[Service]\nExecStart=\nExecStart=/usr/lib/jvm/java-25-openjdk-amd64/bin/java -Xms4G -Xmx4G -jar /media/ssd/paper/paper.jar --nogui\n' | sudo tee /etc/systemd/system/minecraft.service.d/20-java25.conf && sudo systemctl daemon-reload
+```
+
 - ホワイトリスト登録: Java 版は `whitelist add <名前>`、Bedrock 版は `fwhitelist add <ゲーマータグ>`。ホワイトリストが参加者を絞る本体です（Cognito はポートを開ける仕組みです）。
 
 ### アクセスキーと Webhook の配置
 
-秘密情報は Terraform の state にもリポジトリにも置きません。`craftlatch-host` の最初のアクセスキーは、管理者用の認証情報で発行してサーバー上に直接書き出します（表示はされません）。ファイルは先に 0400 で作ってから書き込みます。
+秘密情報は Terraform の state にもリポジトリにも置きません。`craftlatch-host` の最初のアクセスキーは、コンソールでロールに切り替えた CloudShell で発行し、サーバーの入力待ちに貼り付けて書き込みます。サーバーに管理者の認証情報を置かずに済みます。秘密の値はチャットやメモに残さず、サーバー側は `read -rs` で受け取って画面に表示しません。
 
-先に `sudo -v` で sudo の認証を済ませておきます（パイプの途中でパスワードを求められると、空のファイルになるのを防ぐため）。
+【サーバー】先に `sudo -v` で sudo の認証を済ませ（パイプの途中でパスワードを求められて空のファイルになるのを防ぐため）、置き場所と空のファイル（0400、root）を作ります。
 
 ```
 sudo -v
-sudo install -d -m 0755 /etc/craftlatch
-sudo install -m 0400 -o root -g root /dev/null /etc/craftlatch/aws-credentials
-aws iam create-access-key --user-name craftlatch-host --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text | awk '{printf "[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n", $1, $2}' | sudo tee /etc/craftlatch/aws-credentials > /dev/null
+sudo install -d -m 0755 /etc/craftlatch && sudo install -m 0400 -o root -g root /dev/null /etc/craftlatch/aws-credentials && sudo install -m 0400 -o root -g root /dev/null /etc/craftlatch/discord-webhook && echo ok
+```
+
+【サーバー】受け取る側を先に待たせておきます（何も表示されないまま入力待ちになります）。
+
+```
+read -rs AKID SECRET && printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$AKID" "$SECRET" | sudo tee /etc/craftlatch/aws-credentials > /dev/null; unset AKID SECRET; sudo grep -c '^aws_access_key_id = AKIA' /etc/craftlatch/aws-credentials
+```
+
+【CloudShell】キーを発行します。「AKIA... <シークレット>」が 1 行で 1 回だけ表示されるので、その行をコピーしてサーバーの入力待ちに貼り、Enter を押します。サーバーに `1` が表示されれば成功です。
+
+```
+aws iam create-access-key --user-name craftlatch-host --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text
+```
+
+【CloudShell】画面からキーを消し、キーが 1 本だけ Active であることを確認します。クリップボードに残る場合は、別の文字列をコピーして上書きしておきます。
+
+```
+clear; aws iam list-access-keys --user-name craftlatch-host --query 'AccessKeyMetadata[].[Status,CreateDate]' --output text
+```
+
+【サーバー】発行日を記録します。
+
+```
 date +%F | sudo tee /etc/craftlatch/aws-credentials.rotated
 ```
 
-書き込めたかを確認します（空のファイルを検出するため）。1 つ目は新しいキーが一覧にあること、2 つ目は `1` が表示されることを確認します。
+サーバーに管理者の一時的な認証情報がある場合は、サーバー上で発行して直接書き出してもかまいません（`aws iam create-access-key ... --output text | awk '{printf "[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n", $1, $2}' | sudo tee /etc/craftlatch/aws-credentials > /dev/null`）。
+
+`aws-credentials.rotated` は発行日（`YYYY-MM-DD`）で、335 日経過すると poll が警告を出します。Discord Webhook URL も同じように貼り付けます。最後に `1` が表示されれば成功です。
 
 ```
-aws iam list-access-keys --user-name craftlatch-host
-sudo grep -c '^aws_access_key_id = AKIA' /etc/craftlatch/aws-credentials
+read -rs WEBHOOK_URL && printf '%s\n' "$WEBHOOK_URL" | sudo tee /etc/craftlatch/discord-webhook > /dev/null; unset WEBHOOK_URL; sudo grep -c '^https://discord.com/api/webhooks/' /etc/craftlatch/discord-webhook
 ```
 
-`aws-credentials.rotated` は発行日（`YYYY-MM-DD`）で、335 日経過すると poll が警告を出します。Discord Webhook URL も同様に 0400 で置きます。
-
-```
-sudo install -m 0400 -o root -g root /dev/null /etc/craftlatch/discord-webhook
-read -rs WEBHOOK_URL && printf '%s\n' "$WEBHOOK_URL" | sudo tee /etc/craftlatch/discord-webhook > /dev/null; unset WEBHOOK_URL
-```
+`queue_url` も、CloudShell で `aws sqs get-queue-url --region ap-northeast-1 --queue-name craftlatch-grants --query QueueUrl --output text` を実行して表示し、次の `install.sh` の 1 回目のあとに `config.json` に入れます。
 
 ### `install.sh` の実行
 

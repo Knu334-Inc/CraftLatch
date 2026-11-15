@@ -1286,6 +1286,32 @@ boto3 を使わず SigV4 署名を自作すれば負荷はさらに下がるが�
 
 U1・U3・U6 は外れると設計の一部を見直す必要があるため、実装計画の最初のタスク（事前検証）として本番サーバー上で確認する。
 
+### 13.1 確認の結果（2026-11-15 時点）
+
+詳細は `docs/superpowers/plans/2026-11-01-craftlatch-spike.md` に記録した。
+
+| # | 結果 |
+|---|---|
+| U1 | 成功。`table inet` のまま |
+| U2 | 成功。通信のたびに `expires` が 10 分に戻り、遊び終えて 10 分後に許可リストから消えた |
+| U3 | 成功。停止の完了後（13ms 後）に起動された |
+| U4 | 未試験（参考情報）。正規の停止は `stop` で、停止時の保存はログ（All dimensions are saved）で確認した |
+| U5 | 未試験。`minecraft.service` には `SystemCallFilter` をまだ入れていない。ほかの保護設定（`ProtectSystem=strict`・`RestrictNamespaces=yes` など）の下で、Paper・Geyser・Floodgate が動くこと（統合版での外部接続を含む）は確認した。追加は今後の課題 |
+| U6 | 成功（プラグインなしの一時サーバーと、本番の無人停止の両方） |
+| U7 | 未確認 |
+| U8 | `user_pool_tier` は v5.83.0 以降、`ip_address_type` は v5.96.0 以降 |
+| U9 | 未確認（参考情報。要件は `prompt=login` と `auth_time` で満たす） |
+| U10 | 成功。2 回目の plan は No changes |
+| U11 | 権限を追加して成功。GitHub の OIDC の `sub` は不変 ID 付きの形式、ステージのタグ付き作成に `apigateway:TagResource`、API Gateway のサービスリンクロールの作成。Managed Login は `ALLOW_REFRESH_TOKEN_AUTH` だけで通る |
+| U12 | 管理者が運用中に確認する |
+| U13 | 成功。LAN からは LAN のアドレスで接続できた |
+
+実装後に分かったこと（設計に反映済み）:
+
+- 統合版の新しい接続方式（NetherNet）は TCP/19132 と STUN を使う（6.1）。
+- モバイル回線の大規模 NAT では、ログインした IP とゲームの通信の IP が違うことがある（6.6）。
+- サーバーを Ubuntu 26.04.1（カーネル 7.0、nftables 1.1.6）に更新した。nftables 1.1.6 では `nft -j list` の並びが chain → set になり、fwcheck の雛形を取り直した。Minecraft 26.1 以降の Paper は Java 25 以上が必要。
+
 ## 14. 確認が必要な事項
 
 1. サーバーの搭載メモリと CPU コア数（`-Xmx`・`MemoryHigh`・`MemoryMax`・`CPUQuota` の決定）
@@ -1306,7 +1332,7 @@ U1・U3・U6 は外れると設計の一部を見直す必要があるため、�
 | F05（`prompt=login` の残存リスク） | `MAX_AUTH_AGE = 120` 秒で受容 |
 | GitHub 管理者アカウントの 2 要素認証 | パスキー登録済み |
 | CPU・メモリ | 4 コア、15 GiB（スワップなし） |
-| Ubuntu・systemd | 24.04.5 LTS・systemd 255 |
+| Ubuntu・systemd | 24.04.5 LTS・systemd 255（2026-11 に 26.04.1 へ更新。13.1） |
 | 既存の jar・JVM オプション | `paper-1.21.7-17.jar`、`-Xmx4G -Xms4G`（`start.sh` 経由） |
 | LAN・WireGuard | 認証なしで許可（6.1） |
 | `whiteman.jar` | RCON を使用。廃止予定（7.6） |
