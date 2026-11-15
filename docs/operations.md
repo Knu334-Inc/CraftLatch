@@ -105,6 +105,7 @@ sudo systemctl status craftlatch-firewall.service
 - 許可リストにその人の IP が載っているか（`sudo nft list set inet craftlatch allow4`）。載っていなければ再認証してもらう。モバイル回線では、ログインした IP とゲームの通信の IP が違うことがある（設計書 6.6）。
 - `sudo nft list chain inet craftlatch input` の各行のカウンタ。`@allow4` の行が増えずに `counter drop` だけ増えるなら、許可リストにない IP から届いている。
 - 既存の iptables のカウンタ（`sudo iptables -L INPUT -v -n --line-numbers`）。CraftLatch で許可しても、別のテーブルで捨てられると届かない（`docs/setup.md` ⑥ の事前準備）。
+- CraftLatch のテーブルが消えていないか（`sudo nft list table inet craftlatch`）。`nftables.service` が動くと `flush ruleset` で消える（`docs/setup.md` ⑥ の事前準備）。消えていたら `sudo systemctl restart craftlatch-firewall.service` で読み込み直す。
 - 統合版だけつながらない場合: サーバーで `sudo tcpdump -ni enp3s0 'host <相手のIP>'` を実行して接続してもらう。TCP 19132 が届いていなければ、ルーターの転送か既存のファイアウォールで TCP 19132 が止まっている。Geyser のログに `STUN discovery has had no answer` が続く場合は、STUN の返事が捨てられている（CraftLatch のルールが古い。`install.sh` を再実行する）。
 
 ## 3. アクセスキーのローテーション（365 日ごと、手動）
@@ -115,6 +116,12 @@ sudo systemctl status craftlatch-firewall.service
 
 ```
 sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key
+```
+
+aws CLI を `~/.local` などに入れていて `sudo` の下の `PATH` にない場合は、`AWS_CLI` で場所を渡します。
+
+```
+sudo --preserve-env=AWS_PROFILE,HOME env AWS_CLI=$HOME/.local/bin/aws host/scripts/craftlatch-rotate-key
 ```
 
 `--preserve-env` が許可されていない環境では、設定ファイルの場所を明示して渡します。
@@ -136,6 +143,49 @@ sudo --preserve-env=AWS_PROFILE,HOME host/scripts/craftlatch-rotate-key --finish
 - `--finish` は何度実行しても同じ結果になります。古いキーがすでに削除済みの場合は完了済みとして扱います。
 - **`--finish` は現用のキー（`/etc/craftlatch/aws-credentials` のキー ID）を指定すると、IAM を呼ぶ前に拒否して何もしません。** 誤って現用のキーを無効化しないための保護です。
 - キー ID は `^[A-Z0-9]{16,128}$` の形式でなければなりません。
+
+### サーバーで管理者の認証情報を使えない場合（CloudShell で入れ替える）
+
+管理者の MFA がパスキーで、サーバーの CLI からロールを引き受けられない場合は、スクリプトと同じ順序を手で行います。【CloudShell】はコンソールでロールに切り替えた CloudShell、【サーバー】は sudo できる管理者です。`<aws>` はサーバーの aws CLI のフルパスです。
+
+1. 【サーバー】新しいキーの置き場所（0400）を作り、受け取る側を待たせておきます。最後に `1` が表示されれば書き込めています。
+
+```
+sudo -v && sudo install -m 0400 -o root -g root /dev/null /etc/craftlatch/aws-credentials.new && read -rs AKID SECRET && printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$AKID" "$SECRET" | sudo tee /etc/craftlatch/aws-credentials.new > /dev/null; unset AKID SECRET; sudo grep -c '^aws_access_key_id = AKIA' /etc/craftlatch/aws-credentials.new
+```
+
+2. 【CloudShell】新しいキーを発行し、表示された 1 行をサーバーの入力待ちに貼ります。貼ったら `clear` で画面から消します。
+
+```
+aws iam create-access-key --user-name craftlatch-host --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text
+```
+
+3. 【サーバー】新しいキーだけで動くことを確認します。`craftlatch-host` の ARN が表示されれば成功です（発行直後は反映に数十秒かかることがあります）。
+
+```
+sudo env -i PATH=/usr/bin:/bin AWS_SHARED_CREDENTIALS_FILE=/etc/craftlatch/aws-credentials.new AWS_CONFIG_FILE=/dev/null AWS_PROFILE=default AWS_DEFAULT_REGION=ap-northeast-1 <aws> sts get-caller-identity --query Arn --output text
+```
+
+4. 【サーバー】poll を止めて、キーを入れ替え、発行日を記録して poll を再開します。
+
+```
+sudo systemctl stop craftlatch-poll.timer && sudo mv /etc/craftlatch/aws-credentials.new /etc/craftlatch/aws-credentials && date +%F | sudo tee /etc/craftlatch/aws-credentials.rotated && sudo systemctl start craftlatch-poll.timer
+```
+
+5. 【サーバー】2〜3 分後に、poll がエラーなく動いていることを確認します。エラーが出る場合は、古いキーを無効にする前に原因を調べます（古いキーはまだ有効です）。
+
+```
+journalctl -t craftlatch-poll --since '-5min' --no-pager
+```
+
+6. 【CloudShell】古いキーの ID を確認し、無効にしてから削除します。`<OLD_KEY_ID>` は、作成日の古いほうのキーです。
+
+```
+aws iam list-access-keys --user-name craftlatch-host --query 'AccessKeyMetadata[].[AccessKeyId,Status,CreateDate]' --output text
+```
+```
+aws iam update-access-key --user-name craftlatch-host --access-key-id <OLD_KEY_ID> --status Inactive && aws iam delete-access-key --user-name craftlatch-host --access-key-id <OLD_KEY_ID>
+```
 
 ## 4. ルールの変更（`trusted_sources`・ポート・許可期限）
 
@@ -248,6 +298,8 @@ sudo -u minecraft ln -sfn paper-<ver>-<build>.jar /media/ssd/paper/paper.jar
 ```
 
 4. 次の認証で起動するか、手動で `sudo systemctl start minecraft.service`。起動ログ（`journalctl -u minecraft -f`）で問題がないことを確認する。古い jar は、動作確認の後に整理してよい。
+
+新しい版が求める Java の版にも注意します（Minecraft 26.1 以降は Java 25 以上）。足りないと、起動直後に「requires running the server with Java 25 or above」と出て失敗します。`minecraft.service` は既定の Java（`/usr/bin/java`）を使います。ドロップイン（`/etc/systemd/system/minecraft.service.d/`）で Java のパスを固定している場合は、そのファイルも直してから `sudo systemctl daemon-reload` を実行します。今の上書きの内容は `systemctl cat minecraft.service` で確認できます。
 
 プラグイン（Geyser・Floodgate・Multiverse・DriveBackupV2 など）:
 
