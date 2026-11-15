@@ -228,6 +228,15 @@ def test_mismatch_log_is_short_and_ascii(fixture_json, env, monkeypatch, capsys)
     assert "index" in out and len(out) < 200 and out.isascii()
 
 
+def test_import_check_only_when_it_is_the_sole_argument(fixture_json, env, monkeypatch):
+    # 引数に紛れた --import-check で検査を素通りさせない（起動前の検査は fail-closed）
+    j = copy.deepcopy(fixture_json)
+    _mutate(j, "prepend_accept")
+    monkeypatch.setattr(fwcheck, "RUN", _runner(j))
+    assert fwcheck.main(["x", "--import-check"]) == 1
+    assert fwcheck.main(["--import-check", "--import-check"]) == 1
+
+
 def test_import_check_and_launcher(capsys):
     assert fwcheck.main(["--import-check"]) == 0
     assert "import-ok" in capsys.readouterr().out
